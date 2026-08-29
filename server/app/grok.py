@@ -23,10 +23,13 @@ OPENING_INSTRUCTION = (
 )
 
 
-async def opening_line(state: RunnerState) -> str:
+async def opening_line(state: RunnerState, nudge: str = "") -> str:
+    """`nudge` steers what the coach opens on, so a demo can go straight to a subject."""
     settings = get_settings()
     if not settings.xai_api_key:
         return _fallback(state)
+
+    instruction = f"{OPENING_INSTRUCTION}\n\n{nudge}" if nudge else OPENING_INSTRUCTION
 
     payload = {
         "model": settings.xai_model,
@@ -34,7 +37,7 @@ async def opening_line(state: RunnerState) -> str:
             {"role": "system", "content": COACH_SYSTEM},
             {
                 "role": "user",
-                "content": f"Runner history:\n{state.as_prompt_block()}\n\n{OPENING_INSTRUCTION}",
+                "content": f"Runner history:\n{state.as_prompt_block()}\n\n{instruction}",
             },
         ],
         "temperature": 0.8,

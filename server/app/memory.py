@@ -121,24 +121,41 @@ class Memory:
         )
 
     async def get_state(self, user_id: str) -> RunnerState:
+        """The runner's history, gathered in parallel.
+
+        Mid-call this sits between the runner finishing a sentence and the coach starting
+        one, so the graph searches run together: done one after another they added enough
+        silence for ElevenLabs to abandon the turn.
+        """
         await self.ensure_user(user_id)
-        context = ""
-        latest = _latest_thread_id(await self._client.user.get_threads(user_id))
-        if latest:
-            response = await self._client.thread.get_user_context(latest)
-            context = response.context or ""
+        searches = [
+            self._client.graph.search(user_id=user_id, query=query, scope="edges", limit=5)
+            for query in COMMITMENT_QUERIES
+        ]
+        context_task = self._context(user_id)
+        context, *found = await asyncio.gather(context_task, *searches, return_exceptions=True)
 
         commitments: list[str] = []
-        for query in COMMITMENT_QUERIES:
-            results = await self._client.graph.search(
-                user_id=user_id, query=query, scope="edges", limit=5
-            )
+        for results in found:
+            if isinstance(results, BaseException):
+                log.warning("a commitment search failed for %s: %s", user_id, results)
+                continue
             for edge in results.edges or []:
                 fact = _format_edge(edge)
                 if fact and fact not in commitments:
                     commitments.append(fact)
 
+        if isinstance(context, BaseException):
+            log.warning("could not read the thread context for %s: %s", user_id, context)
+            context = ""
         return RunnerState(user_id=user_id, context=context, commitments=commitments)
+
+    async def _context(self, user_id: str) -> str:
+        latest = _latest_thread_id(await self._client.user.get_threads(user_id))
+        if not latest:
+            return ""
+        response = await self._client.thread.get_user_context(latest)
+        return response.context or ""
 
     async def list_runners(self) -> list[str]:
         """Every runner, not just the first page: the sweep must not silently drop anyone."""

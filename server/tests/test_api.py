@@ -10,7 +10,7 @@ from time import monotonic
 import pytest
 from fastapi.testclient import TestClient
 
-from app import healf, main
+from app import healf, llm, main
 from app.auth import sign
 from app.healf import Catalogue, _from_page, _from_sitemap
 from app.memory import RunnerState, _format_edge
@@ -195,7 +195,7 @@ def test_ring_requires_the_tool_secret(client: TestClient) -> None:
 
 
 def test_ring_reaches_a_connected_runner(client: TestClient, monkeypatch) -> None:
-    async def fake_opening_line(state):
+    async def fake_opening_line(state, nudge=""):
         return "You skipped Sunday. Why?"
 
     monkeypatch.setattr(main.coach, "_memory", FakeMemory())
@@ -285,7 +285,7 @@ def test_spoken_summary_is_readable_aloud() -> None:
 
 
 def test_call_cooldown_survives_a_restart(tmp_path, monkeypatch) -> None:
-    async def fake_opening_line(state):
+    async def fake_opening_line(state, nudge=""):
         return "line"
 
     monkeypatch.setattr("app.proactive.opening_line", fake_opening_line)
@@ -697,3 +697,102 @@ def test_a_tavily_timeout_is_a_race_search_error(monkeypatch) -> None:
 
     with pytest.raises(RaceSearchError):
         asyncio.run(races.search_races("London"))
+
+
+def test_a_demo_call_rings_this_runner_on_the_chosen_subject(
+    client: TestClient, monkeypatch
+) -> None:
+    """The coach still writes the line; the demo only chooses what it opens on."""
+    nudges: list[str] = []
+
+    async def fake_opening_line(state, nudge=""):
+        nudges.append(nudge)
+        return "What have you actually entered?"
+
+    monkeypatch.setattr("app.proactive.opening_line", fake_opening_line)
+    identity = client.post("/api/register").json()
+    url = f"/ws/{identity['user_id']}?token={identity['token']}"
+
+    with client.websocket_connect(url) as tab:
+        response = client.post(
+            f"/api/demo/call?user_id={identity['user_id']}",
+            json={"scenario": "races"},
+            headers={"authorization": f"Bearer {identity['token']}"},
+        )
+        ring = tab.receive_json()
+
+    assert response.json()["rang"] is True
+    assert ring["type"] == "incoming_call"
+    assert "race search tool" in nudges[0]
+
+
+def test_a_demo_call_cannot_be_aimed_at_another_runner(client: TestClient) -> None:
+    identity = client.post("/api/register").json()
+    response = client.post(
+        "/api/demo/call?user_id=someone-else",
+        json={"scenario": "checkin"},
+        headers={"authorization": f"Bearer {identity['token']}"},
+    )
+    assert response.status_code == 401
+
+
+def test_an_unknown_demo_scenario_is_refused(client: TestClient) -> None:
+    identity = client.post("/api/register").json()
+    response = client.post(
+        f"/api/demo/call?user_id={identity['user_id']}",
+        json={"scenario": "whatever"},
+        headers={"authorization": f"Bearer {identity['token']}"},
+    )
+    assert response.status_code == 400
+
+
+def test_a_demo_push_puts_products_on_this_runners_screens(client: TestClient, monkeypatch) -> None:
+    async def search(need: str, limit: int = 6) -> list[healf.Product]:
+        return [_product("gel", "Energy Gel")]
+
+    monkeypatch.setattr(main.catalogue, "search", search)
+    identity = client.post("/api/register").json()
+    url = f"/ws/{identity['user_id']}?token={identity['token']}"
+
+    with client.websocket_connect(url) as tab:
+        response = client.post(
+            f"/api/demo/products?user_id={identity['user_id']}&need=fuelling",
+            headers={"authorization": f"Bearer {identity['token']}"},
+        )
+        pushed = tab.receive_json()
+
+    assert response.json()["shown_on_screens"] == 1
+    assert pushed["products"][0]["title"] == "Energy Gel"
+
+
+def test_private_thinking_never_reaches_the_voice() -> None:
+    thinking = json.dumps({"choices": [{"index": 0, "delta": {"reasoning_content": "hmm"}}]})
+    speech = json.dumps({"choices": [{"index": 0, "delta": {"content": "Run."}}]})
+
+    assert llm._speakable(f"data: {thinking}") is None
+    assert b"Run." in (llm._speakable(f"data: {speech}") or b"")
+    assert llm._speakable("data: [DONE]") == b"data: [DONE]\n\n"
+
+
+def test_the_runners_history_is_read_once_per_call(monkeypatch) -> None:
+    import asyncio
+
+    reads: list[str] = []
+
+    class Counting(FakeMemory):
+        async def get_state(self, user_id: str) -> RunnerState:
+            reads.append(user_id)
+            return await super().get_state(user_id)
+
+    monkeypatch.setattr(llm, "_states", {})
+    memory = Counting()
+
+    async def two_turns() -> None:
+        for _ in range(2):
+            await llm._with_coach_context(
+                [{"role": "system", "content": f"runner_id=fergus runner_sig={sign('fergus')}"}],
+                memory,
+            )
+
+    asyncio.run(two_turns())
+    assert reads == ["fergus"]

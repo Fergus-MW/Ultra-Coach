@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 
 import httpx
@@ -15,9 +16,15 @@ import httpx
 from .auth import verify
 from .config import get_settings
 from .grok import COACH_SYSTEM, XAI_API
-from .memory import Memory
+from .memory import Memory, RunnerState
 
 log = logging.getLogger(__name__)
+
+# A call is a handful of turns over a couple of minutes, and the graph barely moves in
+# that time, so the runner's history is read once and reused: re-reading Zep on every
+# turn cost seconds of silence that ElevenLabs eventually gave up on.
+STATE_TTL_SECONDS = 180
+_states: dict[str, tuple[float, RunnerState]] = {}
 
 
 async def chat_completion(body: dict, memory: Memory) -> httpx.Response | AsyncIterator[bytes]:
@@ -53,10 +60,48 @@ async def _stream(client: httpx.AsyncClient, headers: dict, payload: dict) -> As
                 log.error("xai stream failed: %s %s", response.status_code, detail)
                 yield _error_chunk(detail)
                 return
-            async for chunk in response.aiter_bytes():
-                yield chunk
+            async for line in response.aiter_lines():
+                out = _speakable(line)
+                if out is not None:
+                    yield out
     finally:
         await client.aclose()
+
+
+def _speakable(line: str) -> bytes | None:
+    """Drop Grok's private thinking before it reaches ElevenLabs.
+
+    A reasoning model emits a long run of `reasoning_content` deltas before its first
+    word. ElevenLabs has no use for them and they only delay the audio, so a chunk that
+    carries nothing but thinking is not forwarded.
+    """
+    if not line.startswith("data: "):
+        return f"{line}\n".encode() if line else b"\n"
+
+    body = line[len("data: ") :]
+    if body.strip() == "[DONE]":
+        return f"{line}\n\n".encode()
+    try:
+        chunk = json.loads(body)
+    except ValueError:
+        return f"{line}\n\n".encode()
+
+    for choice in chunk.get("choices", []):
+        delta = choice.get("delta")
+        if isinstance(delta, dict):
+            delta.pop("reasoning_content", None)
+    if _is_empty(chunk):
+        return None
+    return f"data: {json.dumps(chunk)}\n\n".encode()
+
+
+def _is_empty(chunk: dict) -> bool:
+    choices = chunk.get("choices", [])
+    if not choices:
+        return False
+    return all(
+        not choice.get("delta") and choice.get("finish_reason") is None for choice in choices
+    )
 
 
 async def _with_coach_context(messages: list[dict], memory: Memory) -> list[dict]:
@@ -65,7 +110,7 @@ async def _with_coach_context(messages: list[dict], memory: Memory) -> list[dict
     state_block = ""
     if user_id:
         try:
-            state = await memory.get_state(user_id)
+            state = await _state(user_id, memory)
             state_block = state.as_prompt_block()
         except Exception:
             log.exception("could not load Zep state for %s", user_id)
@@ -79,6 +124,16 @@ async def _with_coach_context(messages: list[dict], memory: Memory) -> list[dict
     if inherited:
         system = f"{system}\n\n{inherited[0].get('content', '')}"
     return [{"role": "system", "content": system}, *rest]
+
+
+async def _state(user_id: str, memory: Memory) -> RunnerState:
+    cached = _states.get(user_id)
+    now = time.monotonic()
+    if cached and now - cached[0] < STATE_TTL_SECONDS:
+        return cached[1]
+    state = await memory.get_state(user_id)
+    _states[user_id] = (now, state)
+    return state
 
 
 def _runner_from(messages: list[dict]) -> str:

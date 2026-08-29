@@ -115,6 +115,9 @@ class Bucket:
 
 
 _session_throttle = Throttle()
+# A demo call spends Grok and ElevenLabs credit, but it is meant for rapid iteration, so
+# the gap is short enough to try one scenario after another.
+_demo_throttle = Throttle(every=8.0)
 _register_bucket = Bucket(burst=10, per_second=0.2)
 
 
@@ -151,6 +154,12 @@ class RaceQuery(BaseModel):
 
 class CallRequest(BaseModel):
     force: bool = False
+
+
+class DemoRequest(BaseModel):
+    """Which rehearsed conversation the runner wants the coach to open with."""
+
+    scenario: str = Field(default="checkin", max_length=40)
 
 
 class ProductQuery(BaseModel):
@@ -240,6 +249,50 @@ async def proactive_ring(user_id: str, body: CallRequest | None = None) -> dict:
         "opening_line": outcome.opening_line,
         "delivered_to": outcome.delivered,
     }
+
+
+# The coach normally decides when to ring, which makes the product hard to try: you can
+# either wait for the sweep or nothing happens at all. These let the runner ask for a
+# specific conversation now, on their own id only, and each one still goes through the
+# real ring, the real agent and the real tools.
+DEMO_SCENARIOS = {
+    "checkin": "",
+    "races": (
+        "Open by demanding they name a race they will enter, and use your race search "
+        "tool this call to put real events in front of them."
+    ),
+    "products": (
+        "Open on how they are fuelling and recovering, and once they answer use your "
+        "product tool so the kit they need appears on their screen."
+    ),
+    "excuse": (
+        "Open by accusing them of skipping the session they promised, and refuse the "
+        "first excuse they give you."
+    ),
+}
+
+
+@app.post("/api/demo/call")
+async def demo_call(
+    body: DemoRequest,
+    user_id: str,
+    authorization: str = Header(default=""),
+) -> dict:
+    """Ring this runner now, on a chosen subject, so the flow can be tried on demand."""
+    require_runner(user_id, authorization)
+    if body.scenario not in DEMO_SCENARIOS:
+        raise HTTPException(status_code=400, detail="unknown scenario")
+
+    admitted, stamp = _demo_throttle.allow(user_id)
+    if not admitted:
+        raise HTTPException(status_code=429, detail="give the last call a moment")
+
+    try:
+        outcome = await coach.call(user_id, force=True, nudge=DEMO_SCENARIOS[body.scenario])
+    except Exception:
+        _demo_throttle.refund(user_id, stamp)
+        raise
+    return {"rang": outcome.rang, "opening_line": outcome.opening_line}
 
 
 @app.post("/webhooks/elevenlabs")
@@ -338,6 +391,25 @@ async def tool_recommend_products(body: ProductQuery) -> dict:
         "shown_on_screens": shown,
         "products": [product.model_dump() for product in products],
     }
+
+
+@app.post("/api/demo/products")
+async def demo_products(
+    user_id: str,
+    need: str = "",
+    authorization: str = Header(default=""),
+) -> dict:
+    """The same screen push the coach makes, without waiting for it to decide to."""
+    require_runner(user_id, authorization)
+    try:
+        products = await catalogue.search(need[:200] or "electrolytes for cramp on long runs")
+    except HealfError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+    shown = await ringer.show_products(
+        user_id, need, [product.model_dump() for product in products]
+    )
+    return {"shown_on_screens": shown, "products": len(products)}
 
 
 @app.post("/llm/chat/completions", dependencies=[Depends(require_tool_secret)])

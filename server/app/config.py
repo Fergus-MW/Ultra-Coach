@@ -11,7 +11,9 @@ class Settings(BaseSettings):
     elevenlabs_webhook_secret: str = ""
 
     xai_api_key: str = ""
-    xai_model: str = "grok-4-fast-reasoning"
+    # A reasoning model spends seconds thinking before its first spoken word, and a
+    # call is a conversation: ElevenLabs abandoned turns waiting for it.
+    xai_model: str = "grok-4.20-0309-non-reasoning"
 
     zep_api_key: str = ""
     tavily_api_key: str = ""

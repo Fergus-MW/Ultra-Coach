@@ -1,5 +1,5 @@
-const ID_KEY = "ultracoach.runner_id";
-const TOKEN_KEY = "ultracoach.runner_token";
+const ID_KEY = 'ultracoach.runner_id';
+const TOKEN_KEY = 'ultracoach.runner_token';
 
 export type Identity = { userId: string; token: string };
 
@@ -29,14 +29,14 @@ export async function identity(): Promise<Identity> {
 /** One registration at a time across tabs, where the browser supports it. */
 async function locked(): Promise<Identity> {
   if (!navigator.locks) return register();
-  return navigator.locks.request("ultracoach.identity", register);
+  return navigator.locks.request('ultracoach.identity', register);
 }
 
 async function register(): Promise<Identity> {
   const stored = readIdentity();
   if (stored) return stored;
 
-  const response = await fetch(`${apiBase}/api/register`, { method: "POST" });
+  const response = await fetch(`${apiBase}/api/register`, { method: 'POST' });
   if (!response.ok) {
     throw new Error(`register ${response.status}: ${await response.text()}`);
   }
@@ -65,25 +65,23 @@ export function forgetIdentity(): void {
  */
 function resolveApiBase(): string {
   const configured = process.env.NEXT_PUBLIC_API_BASE?.trim();
-  if (configured) return configured.replace(/\/$/, "");
+  if (configured) return configured.replace(/\/$/, '');
 
-  const host = typeof window === "undefined" ? "localhost" : window.location.hostname;
-  if (host === "localhost" || host === "127.0.0.1") return "http://localhost:8000";
+  const host = typeof window === 'undefined' ? 'localhost' : window.location.hostname;
+  if (host === 'localhost' || host === '127.0.0.1') return 'http://localhost:8000';
 
-  console.error("NEXT_PUBLIC_API_BASE is not set; falling back to this origin");
-  return "";
+  console.error('NEXT_PUBLIC_API_BASE is not set; falling back to this origin');
+  return '';
 }
 
 export const apiBase = resolveApiBase();
 
 export function wsUrl(path: string): string {
   if (!apiBase) {
-    const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+    const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
     return `${scheme}://${window.location.host}${path}`;
   }
-  const base = apiBase.startsWith("https")
-    ? apiBase.replace("https", "wss")
-    : apiBase.replace("http", "ws");
+  const base = apiBase.startsWith('https') ? apiBase.replace('https', 'wss') : apiBase.replace('http', 'ws');
   return `${base}${path}`;
 }
 
@@ -106,9 +104,9 @@ export type Product = {
 };
 
 /** Healf's range, read through the backend so the tab and the coach agree on it. */
-export async function fetchProducts(who: Identity, need = ""): Promise<Product[]> {
+export async function fetchProducts(who: Identity, need = ''): Promise<Product[]> {
   const query = new URLSearchParams({ user_id: who.userId });
-  if (need) query.set("need", need);
+  if (need) query.set('need', need);
 
   const response = await fetch(`${apiBase}/api/products?${query}`, {
     headers: { authorization: `Bearer ${who.token}` },
@@ -119,11 +117,45 @@ export async function fetchProducts(who: Identity, need = ""): Promise<Product[]
   return (await response.json()).products;
 }
 
+export type Scenario = 'checkin' | 'races' | 'products' | 'excuse';
+
+/**
+ * Ask the coach to ring now on a chosen subject. The coach still decides what it says
+ * and still uses its own tools — this only skips the wait for its own schedule, so the
+ * whole flow can be tried in seconds rather than at the next check-in hour.
+ */
+export async function demoCall(who: Identity, scenario: Scenario): Promise<void> {
+  const query = new URLSearchParams({ user_id: who.userId });
+  const response = await fetch(`${apiBase}/api/demo/call?${query}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${who.token}`,
+    },
+    body: JSON.stringify({ scenario }),
+  });
+  if (!response.ok) {
+    throw new Error(`demo call ${response.status}: ${await response.text()}`);
+  }
+}
+
+/** Push Healf recommendations to this device's screens, as the coach would mid-call. */
+export async function demoProducts(who: Identity, need: string): Promise<void> {
+  const query = new URLSearchParams({ user_id: who.userId, need });
+  const response = await fetch(`${apiBase}/api/demo/products?${query}`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${who.token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`demo products ${response.status}: ${await response.text()}`);
+  }
+}
+
 export async function requestSession(who: Identity): Promise<SessionGrant> {
   const response = await fetch(`${apiBase}/api/session`, {
-    method: "POST",
+    method: 'POST',
     headers: {
-      "content-type": "application/json",
+      'content-type': 'application/json',
       authorization: `Bearer ${who.token}`,
     },
     body: JSON.stringify({ user_id: who.userId }),

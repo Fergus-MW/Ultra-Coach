@@ -151,7 +151,7 @@ class Coach:
                 outcomes.append(CallOutcome(user_id, False, "call failed"))
         return outcomes
 
-    async def call(self, user_id: str, *, force: bool = False) -> CallOutcome:
+    async def call(self, user_id: str, *, force: bool = False, nudge: str = "") -> CallOutcome:
         # The daily and the every-15-minutes sweep overlap whenever the check-in hour
         # lands on a quarter hour, so admission has to be decided one runner at a time.
         async with self._admission:
@@ -165,7 +165,7 @@ class Coach:
 
         try:
             state = await self._memory.get_state(user_id)
-            line = await opening_line(state)
+            line = await opening_line(state, nudge)
             reason = state.commitments[0] if state.commitments else "routine check-in"
             delivered = await self._ringer.ring(user_id, line, reason)
             if delivered:
