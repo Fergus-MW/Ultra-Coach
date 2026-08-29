@@ -70,6 +70,16 @@ describe('RunTracker', () => {
     expect(metrics.gradientPct).toBeGreaterThan(20);
   });
 
+  it('drops the gradient once the location fixes go stale', () => {
+    const tracker = new RunTracker(START);
+    for (let index = 0; index <= 60; index += 1) {
+      tracker.addLocation(point(index, 100 + index));
+    }
+    expect(tracker.metrics(START + 60_000).gradientPct).toBeGreaterThan(20);
+    // GPS drops out: the coach must not keep announcing a hill from old fixes.
+    expect(tracker.metrics(START + 120_000).gradientPct).toBe(0);
+  });
+
   it('ignores samples with poor accuracy', () => {
     const tracker = new RunTracker(START);
     tracker.addLocation(point(0, 100));

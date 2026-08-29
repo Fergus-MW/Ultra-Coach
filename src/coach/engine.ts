@@ -240,7 +240,11 @@ export class CoachEngine {
       cues.push(this.staticCandidate('hr_restored', () => (state.hrLost = false)));
     }
 
-    if (metrics.heartRateBpm !== null && target.type !== 'rest') {
+    if (metrics.heartRateBpm === null || target.type === 'rest') {
+      // No qualifying signal, so no sustain window can be accruing.
+      state.zoneHighSince = null;
+      state.zoneLowSince = null;
+    } else {
       const [low, high] = zoneRangeBpm(zones, target.zone);
       const bpm = metrics.heartRateBpm;
       if (bpm > high) {
@@ -357,9 +361,12 @@ export class CoachEngine {
       return null;
     }
     const risePct = ((sample.bpm - baseline.bpm) / baseline.bpm) * 100;
-    state.driftBaseline = sample;
-    if (risePct < this.config.driftThresholdPct) return null;
-    if (this.firedRecently('cardiac_drift', now, 20 * 60_000)) return null;
-    return this.staticCandidate('cardiac_drift');
+    if (risePct < this.config.driftThresholdPct || this.firedRecently('cardiac_drift', now, 20 * 60_000)) {
+      state.driftBaseline = sample;
+      return null;
+    }
+    // The baseline only moves on if the warning is actually spoken, otherwise a
+    // competing cue would bury the drift for another quarter of an hour.
+    return this.staticCandidate('cardiac_drift', () => (state.driftBaseline = sample));
   }
 }

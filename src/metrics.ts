@@ -67,6 +67,8 @@ const GRADIENT_WINDOW_M = 40;
 const HR_AVERAGE_WINDOW_MS = 60_000;
 const ALTITUDE_SMOOTHING = 5;
 const ELEVATION_THRESHOLD_M = 1;
+/** Beyond this, location derived readings are guesses about the past. */
+const LOCATION_STALE_MS = 15_000;
 
 interface TrackPoint {
   timestamp: number;
@@ -114,6 +116,7 @@ export class RunTracker {
     this.paused = paused;
     if (paused) return;
     this.lastLocation = null;
+    this.track = [];
     this.lastZoneAt = null;
     this.lastZone = null;
     this.rawAltitudes = [];
@@ -208,13 +211,14 @@ export class RunTracker {
     const dtMs = end.timestamp - start.timestamp;
     const dM = end.cumulativeM - start.cumulativeM;
     if (dtMs < 5_000 || dM < 5) return null;
-    if (now - end.timestamp > 15_000) return null;
+    if (now - end.timestamp > LOCATION_STALE_MS) return null;
     return (dtMs / 1000 / dM) * 1000;
   }
 
-  private gradient(): number {
+  private gradient(now: number): number {
     if (this.track.length < 2) return 0;
     const end = this.track[this.track.length - 1];
+    if (now - end.timestamp > LOCATION_STALE_MS) return 0;
     if (end.smoothedAltitude === null) return 0;
     let start: TrackPoint | null = null;
     for (let i = this.track.length - 2; i >= 0; i -= 1) {
@@ -245,7 +249,7 @@ export class RunTracker {
       paceSecPerKm: this.instantPace(now),
       averagePaceSecPerKm:
         this.distanceM > 50 && this.movingMs > 0 ? (this.movingMs / 1000 / this.distanceM) * 1000 : null,
-      gradientPct: this.gradient(),
+      gradientPct: this.gradient(now),
       heartRateBpm: bpm,
       heartRateAvgBpm: this.averageHeartRate(now, HR_AVERAGE_WINDOW_MS),
       zone: bpm === null ? null : zoneForBpm(this.zones, bpm),

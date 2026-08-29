@@ -62,6 +62,16 @@ describe('CoachEngine', () => {
     expect(after).toContain('fuel');
   });
 
+  it('restarts the sustain window after a heart rate dropout', () => {
+    const engine = new CoachEngine(START);
+    run(engine, 1, 18, { heartRateBpm: 175, zone: 5 });
+    run(engine, 19, 25, { heartRateBpm: null, zone: null, heartRateAgeMs: 40_000 });
+    // The strap comes back reading high: the twenty second window starts again
+    // rather than firing on time accrued while there was no signal.
+    expect(run(engine, 26, 40, { heartRateBpm: 175, zone: 5 })).not.toContain('zone_high');
+    expect(run(engine, 41, 50, { heartRateBpm: 175, zone: 5 })).toContain('zone_high');
+  });
+
   it('confirms the return to zone once', () => {
     const engine = new CoachEngine(START);
     run(engine, 1, 40, { heartRateBpm: 175, zone: 5 });
