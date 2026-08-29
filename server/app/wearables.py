@@ -88,6 +88,9 @@ class Wearable:
         self._links: dict[str, str] = {}
         self._snapshots: dict[str, Snapshot] = {}
         self._minting: dict[str, asyncio.Lock] = {}
+        # Runners whose backfill has already been asked for, so a poll every few seconds
+        # does not queue ninety days of history over and over.
+        self._backfilled: set[str] = set()
 
     @property
     def configured(self) -> bool:
@@ -197,6 +200,9 @@ class Wearable:
         snapshot.connected = False
         snapshot.readings.clear()
         snapshot.measured.clear()
+        # Reconnecting is a fresh watch as far as we are concerned: ask for the history
+        # again rather than trusting the backfill this consent never had.
+        self._backfilled.discard(runner_id)
         await self._write(
             "UPDATE wearable_links SET confirmed = FALSE WHERE runner_id = $1", runner_id
         )
@@ -330,6 +336,13 @@ class Wearable:
         if not user_id or not await self.check_connection(runner_id):
             return []
 
+        # Nothing arrives on its own: the platform pulls from Google on its own
+        # schedule, and a runner who has just given consent would otherwise stare at an
+        # empty watch until the next sweep came round. The first ask is for the whole
+        # history, because a fresh connection holds nothing at all.
+        await self._sync(user_id, historical=runner_id not in self._backfilled)
+        self._backfilled.add(runner_id)
+
         window = {
             "start_date": (date.today() - timedelta(days=days)).isoformat(),
             "end_date": date.today().isoformat(),
@@ -351,6 +364,19 @@ class Wearable:
                 ):
                     found.append((kind, fact))
         return found
+
+    async def _sync(self, user_id: str, historical: bool) -> None:
+        """Ask the platform to pull from the provider now. It answers before it has.
+
+        The work is queued on their side, so this call brings back nothing itself; it is
+        the poll after it that sees the data.
+        """
+        provider = get_settings().wearables_provider
+        path = f"/api/v1/providers/{provider}/users/{user_id}/sync"
+        try:
+            await self._call("POST", f"{path}/historical" if historical else path)
+        except Exception as error:  # a platform that will not sync still has a week held
+            log.warning("could not ask %s to sync %s: %s", provider, user_id, error)
 
     async def load(self) -> None:
         """Read the connections and the last readings back at startup."""

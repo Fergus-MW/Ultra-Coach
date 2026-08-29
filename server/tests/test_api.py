@@ -1241,6 +1241,28 @@ def test_a_week_of_running_is_not_collapsed_into_one_run(wearable: Wearable, mon
     assert "10.0 km" in block and "32.0 km" in block
 
 
+def test_a_fresh_connection_asks_the_platform_for_the_history(
+    wearable: Wearable, monkeypatch
+) -> None:
+    configured = main.get_settings()
+    monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")
+    monkeypatch.setattr(configured, "wearables_api_key", "sk-test")
+    monkeypatch.setattr(configured, "wearables_provider", "google")
+    ran(wearable.link("user-1", "fergus", "google", confirmed=True))
+    seen = platform(monkeypatch, wearable, {})
+
+    ran(wearable.refresh("fergus"))
+    ran(wearable.refresh("fergus"))
+
+    asked = [path for method, path in seen if method == "POST"]
+    # Nothing is pushed to us, so a runner who has just consented sees an empty watch
+    # until the platform is told to pull — and the backfill is asked for only once.
+    assert asked == [
+        "/api/v1/providers/google/users/user-1/sync/historical",
+        "/api/v1/providers/google/users/user-1/sync",
+    ]
+
+
 def test_revoking_consent_takes_the_watch_away_again(wearable: Wearable, monkeypatch) -> None:
     configured = main.get_settings()
     monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")

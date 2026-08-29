@@ -226,6 +226,19 @@ export default function CallScreen({ onProducts }: Props) {
     return () => document.removeEventListener('visibilitychange', refresh);
   }, []);
 
+  const awaitingSync = Boolean(wearable?.connected && !Object.keys(wearable.panel ?? {}).length);
+  useEffect(() => {
+    // The platform pulls from Google in the background after consent, so the first
+    // numbers arrive some seconds after the watch says it is connected. Poll until they
+    // do rather than leaving the runner to guess when to come back.
+    if (!awaitingSync) return;
+    const timer = window.setInterval(() => {
+      const me = who.current;
+      if (me && !document.hidden) wearableStatus(me).then(setWearable, () => undefined);
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [awaitingSync]);
+
   const linkWatch = useCallback(async () => {
     const me = who.current;
     if (!me) return;
@@ -342,9 +355,7 @@ export default function CallScreen({ onProducts }: Props) {
           {wearable?.available && (
             <div className={styles.demo}>
               <p className={styles.demoLabel}>
-                {wearable.connected
-                  ? 'Your watch is feeding the coach'
-                  : 'Give it your training data'}
+                {wearable.connected ? 'Your watch is feeding the coach' : 'Give it your training data'}
               </p>
               {wearable.connected ? (
                 <>
@@ -358,11 +369,7 @@ export default function CallScreen({ onProducts }: Props) {
                   </button>
                 </>
               ) : (
-                <button
-                  className={styles.demoButton}
-                  disabled={busy !== ''}
-                  onClick={() => void linkWatch()}
-                >
+                <button className={styles.demoButton} disabled={busy !== ''} onClick={() => void linkWatch()}>
                   Connect my watch
                 </button>
               )}

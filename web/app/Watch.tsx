@@ -11,7 +11,11 @@ type Tile = { label: string; value: string; note: string };
 export default function Watch({ panel }: { panel: WearablePanel }) {
   const tiles = toTiles(panel);
   if (!tiles.length) {
-    return <p className={styles.empty}>Waiting for the first sync.</p>;
+    return (
+      <p className={styles.empty}>
+        Connected. Pulling your history off the watch — it lands in a minute or two.
+      </p>
+    );
   }
 
   return (
@@ -47,8 +51,7 @@ function toTiles(panel: WearablePanel): Tile[] {
 
   if (sleep) {
     const when = `night of ${day(sleep.at)}`;
-    if (sleep.asleep_minutes)
-      tiles.push({ label: 'Asleep', value: hours(sleep.asleep_minutes), note: when });
+    if (sleep.asleep_minutes) tiles.push({ label: 'Asleep', value: hours(sleep.asleep_minutes), note: when });
     if (sleep.efficiency_percent)
       tiles.push({
         label: 'Sleep quality',
@@ -56,16 +59,14 @@ function toTiles(panel: WearablePanel): Tile[] {
         note: when,
       });
     if (sleep.hrv_ms) tiles.push({ label: 'HRV', value: `${round(sleep.hrv_ms)} ms`, note: when });
-    if (sleep.avg_bpm)
-      tiles.push({ label: 'Sleeping HR', value: `${round(sleep.avg_bpm)} bpm`, note: when });
+    if (sleep.avg_bpm) tiles.push({ label: 'Sleeping HR', value: `${round(sleep.avg_bpm)} bpm`, note: when });
   }
 
   if (activity) {
     const when = `${activity.name ?? 'Session'} · ${day(activity.at)}`;
     if (activity.km) tiles.push({ label: 'Last run', value: `${activity.km.toFixed(1)} km`, note: when });
     if (activity.minutes) tiles.push({ label: 'Time', value: hours(activity.minutes), note: when });
-    if (activity.pace_per_km)
-      tiles.push({ label: 'Pace', value: `${activity.pace_per_km} /km`, note: when });
+    if (activity.pace_per_km) tiles.push({ label: 'Pace', value: `${activity.pace_per_km} /km`, note: when });
     if (activity.avg_bpm)
       tiles.push({ label: 'Run HR', value: `${round(activity.avg_bpm)} bpm`, note: when });
   }

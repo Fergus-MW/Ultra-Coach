@@ -102,7 +102,10 @@ export default function CoachTab() {
           <Card title={wearable.connected ? 'Your watch feeds the coach' : 'Give it your data'}>
             {wearable.connected ? (
               <>
-                <Muted>{wearable.summary || 'Waiting for the first sync.'}</Muted>
+                <Muted>
+                  {wearable.summary ||
+                    'Connected. Pulling your history off the watch — it lands in a minute or two.'}
+                </Muted>
                 <Button
                   label="Disconnect my watch"
                   variant="secondary"
