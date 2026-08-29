@@ -3,10 +3,10 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from hmac import compare_digest
+from time import monotonic
 
 import httpx
 from fastapi import (
-    BackgroundTasks,
     Depends,
     FastAPI,
     Header,
@@ -18,7 +18,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .auth import bearer, issue_identity, verify, verify_webhook
 from .config import Settings, get_settings
@@ -61,6 +61,24 @@ def require_tool_secret(x_tool_secret: str = Header(default="")) -> None:
         raise HTTPException(status_code=401, detail="bad tool secret")
 
 
+class Throttle:
+    """A minted conversation token costs ElevenLabs credit, so one device cannot spin."""
+
+    def __init__(self, every: float = 20.0) -> None:
+        self._every = every
+        self._last: dict[str, float] = {}
+
+    def allow(self, key: str) -> bool:
+        now = monotonic()
+        if now - self._last.get(key, 0.0) < self._every:
+            return False
+        self._last[key] = now
+        return True
+
+
+_session_throttle = Throttle()
+
+
 def require_runner(user_id: str, authorization: str = Header(default="")) -> str:
     """The device proves it owns this runner id with the token it was issued."""
     if not verify(user_id, bearer(authorization)):
@@ -84,9 +102,11 @@ class SessionResponse(BaseModel):
 
 
 class RaceQuery(BaseModel):
-    location: str
-    distance: str = ""
-    months_ahead: int = 9
+    """Bounded because every search is a paid Tavily call the agent can ask for freely."""
+
+    location: str = Field(max_length=120)
+    distance: str = Field(default="", max_length=60)
+    months_ahead: int = Field(default=9, ge=1, le=24)
 
 
 class CallRequest(BaseModel):
@@ -114,6 +134,8 @@ async def create_session(
 ) -> SessionResponse:
     """Everything the browser needs to open a call, minus any credential."""
     require_runner(body.user_id, authorization)
+    if not _session_throttle.allow(body.user_id):
+        raise HTTPException(status_code=429, detail="too many sessions")
     if not settings.elevenlabs_agent_id:
         raise HTTPException(status_code=503, detail="no agent configured")
 
@@ -140,7 +162,6 @@ async def proactive_ring(user_id: str, body: CallRequest | None = None) -> dict:
 @app.post("/webhooks/elevenlabs-transcript")
 async def elevenlabs_transcript(
     request: Request,
-    background: BackgroundTasks,
     elevenlabs_signature: str = Header(default=""),
     settings: Settings = Depends(get_settings),
 ) -> dict:
@@ -171,7 +192,15 @@ async def elevenlabs_transcript(
         for item in data.get("transcript", [])
         if item.get("message")
     ]
-    background.add_task(memory.add_transcript, user_id, conversation_id, turns)
+    # Ingest before acknowledging: a 200 tells ElevenLabs to stop retrying, so a Zep
+    # failure after that point would lose the call. Ingestion is idempotent by
+    # conversation id, so a retry is safe.
+    try:
+        await memory.add_transcript(user_id, conversation_id, turns)
+    except Exception:
+        log.exception("failed to ingest transcript %s", conversation_id)
+        raise HTTPException(status_code=500, detail="transcript ingestion failed") from None
+
     return {"status": "ingested", "turns": len(turns)}
 
 

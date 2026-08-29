@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 
@@ -80,9 +81,9 @@ def client(fake_memory) -> TestClient:
         yield test_client
 
 
-def signed(payload: dict) -> tuple[bytes, dict[str, str]]:
+def signed(payload: dict, age_seconds: int = 0) -> tuple[bytes, dict[str, str]]:
     body = json.dumps(payload).encode()
-    timestamp = "1700000000"
+    timestamp = str(int(time.time()) - age_seconds)
     digest = hmac.new(WEBHOOK_SECRET.encode(), f"{timestamp}.".encode() + body, sha256).hexdigest()
     return body, {
         "content-type": "application/json",
@@ -130,6 +131,41 @@ def test_transcript_webhook_rejects_a_forged_payload(
     )
     assert response.status_code == 401
     assert fake_memory.transcripts == []
+
+
+def test_transcript_webhook_rejects_a_replayed_delivery(
+    client: TestClient, fake_memory: FakeMemory
+) -> None:
+    body, headers = signed(
+        {
+            "data": {
+                "conversation_id": "conv_old",
+                "transcript": [{"role": "user", "message": "hi"}],
+            }
+        },
+        age_seconds=3 * 60 * 60,
+    )
+    response = client.post("/webhooks/elevenlabs-transcript", content=body, headers=headers)
+
+    assert response.status_code == 401
+    assert fake_memory.transcripts == []
+
+
+def test_transcript_webhook_reports_an_ingestion_failure(client: TestClient, monkeypatch) -> None:
+    async def boom(*args, **kwargs):
+        raise RuntimeError("zep is down")
+
+    monkeypatch.setattr(main.memory, "add_transcript", boom)
+    body, headers = signed(
+        {
+            "data": {
+                "conversation_id": "conv_2",
+                "transcript": [{"role": "user", "message": "I skipped it."}],
+            }
+        }
+    )
+    response = client.post("/webhooks/elevenlabs-transcript", content=body, headers=headers)
+    assert response.status_code == 500
 
 
 def test_ring_is_skipped_when_runner_is_offline(client: TestClient) -> None:
@@ -260,6 +296,42 @@ def test_online_sweep_waits_for_the_checkin_hour(monkeypatch, tmp_path) -> None:
 
     coach._calls.record("fergus", datetime.now(timezone.utc) - timedelta(minutes=1))
     assert coach._checkin_missed("fergus") is False
+
+
+def test_a_failing_runner_does_not_cancel_the_rest_of_the_sweep(tmp_path) -> None:
+    import asyncio
+
+    class ManyRunners(FakeMemory):
+        async def list_runners(self) -> list[str]:
+            return ["broken", "fergus"]
+
+        async def get_state(self, user_id: str) -> RunnerState:
+            if user_id == "broken":
+                raise RuntimeError("zep is down")
+            return await super().get_state(user_id)
+
+    ringer = FakeRinger()
+    coach = Coach(ManyRunners(), ringer, tmp_path / "calls.json")
+
+    outcomes = asyncio.run(coach.sweep())
+
+    assert [outcome.rang for outcome in outcomes] == [False, True]
+    assert ringer.rings == ["fergus"]
+
+
+def test_session_minting_is_throttled_per_device(client: TestClient, monkeypatch) -> None:
+    async def token(agent_id: str) -> str:
+        return "conv-token"
+
+    monkeypatch.setattr(main, "conversation_token", token)
+    monkeypatch.setattr(main.get_settings(), "elevenlabs_agent_id", "agent_1")
+
+    identity = client.post("/api/register").json()
+    headers = {"authorization": f"Bearer {identity['token']}"}
+    body = {"user_id": identity["user_id"]}
+
+    assert client.post("/api/session", json=body, headers=headers).status_code == 200
+    assert client.post("/api/session", json=body, headers=headers).status_code == 429
 
 
 def test_resolved_commitments_are_dropped() -> None:

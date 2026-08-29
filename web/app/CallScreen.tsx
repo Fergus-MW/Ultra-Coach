@@ -3,8 +3,8 @@
 import { useConversation } from "@elevenlabs/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { identity, type Identity, requestSession, wsUrl } from "@/lib/runner";
-import { Ringtone } from "@/lib/ringtone";
+import { forgetIdentity, identity, type Identity, requestSession, wsUrl } from "@/lib/runner";
+import { Ringtone, unlockAudio } from "@/lib/ringtone";
 import styles from "./call.module.css";
 
 type Screen = "standby" | "ringing" | "connecting" | "live" | "ended";
@@ -15,6 +15,7 @@ export default function CallScreen() {
   const [screen, setScreen] = useState<Screen>("standby");
   const [incoming, setIncoming] = useState<IncomingCall | null>(null);
   const [online, setOnline] = useState(false);
+  const [audible, setAudible] = useState(false);
   const [error, setError] = useState("");
 
   const socket = useRef<WebSocket | null>(null);
@@ -22,7 +23,12 @@ export default function CallScreen() {
   const who = useRef<Identity | null>(null);
 
   const conversation = useConversation({
-    onConnect: () => setScreen("live"),
+    onConnect: () => {
+      setScreen("live");
+      // Only a connected session counts as answered: a denied microphone or a failed
+      // token must not go into the runner's history as a call they took.
+      socket.current?.send(JSON.stringify({ type: "call_answered" }));
+    },
     onDisconnect: () => setScreen("ended"),
     onError: (message: string) => {
       setError(message);
@@ -39,7 +45,7 @@ export default function CallScreen() {
     let closed = false;
     let retry: number | undefined;
 
-    const connect = (me: Identity) => {
+    function connect(me: Identity) {
       if (closed) return;
       const next = new WebSocket(
         wsUrl(`/ws/${me.userId}?token=${encodeURIComponent(me.token)}`),
@@ -47,9 +53,17 @@ export default function CallScreen() {
       socket.current = next;
 
       next.onopen = () => setOnline(true);
-      next.onclose = () => {
+      next.onclose = (event) => {
         setOnline(false);
-        if (!closed) retry = window.setTimeout(() => connect(me), 3000);
+        if (closed) return;
+        if (event.code === 1008) {
+          // The server rejected the stored token (rotated or ephemeral signing key).
+          // Retrying it forever would leave this device permanently unreachable.
+          forgetIdentity();
+          retry = window.setTimeout(() => void begin(), 3000);
+          return;
+        }
+        retry = window.setTimeout(() => connect(me), 3000);
       };
       next.onmessage = (event) => {
         const payload = JSON.parse(event.data);
@@ -60,14 +74,18 @@ export default function CallScreen() {
         ringtone.current = new Ringtone();
         ringtone.current.start();
       };
-    };
+    }
 
-    identity()
-      .then((me) => {
-        who.current = me;
-        connect(me);
-      })
-      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+    function begin() {
+      return identity()
+        .then((me) => {
+          who.current = me;
+          connect(me);
+        })
+        .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+    }
+
+    void begin();
 
     return () => {
       closed = true;
@@ -81,7 +99,6 @@ export default function CallScreen() {
     silence();
     setError("");
     setScreen("connecting");
-    socket.current?.send(JSON.stringify({ type: "call_answered" }));
 
     try {
       const me = who.current;
@@ -134,6 +151,15 @@ export default function CallScreen() {
           <p className={styles.idleBody}>
             Keep this open. The coach calls you — there is nothing to fill in.
           </p>
+          {!audible && (
+            <button
+              className={styles.answer}
+              onClick={() => void unlockAudio().then(setAudible)}
+              aria-label="Enable ring sound"
+            >
+              Tap once to let it ring
+            </button>
+          )}
         </section>
       )}
 

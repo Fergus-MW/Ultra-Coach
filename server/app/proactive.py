@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -71,6 +72,8 @@ class Coach:
         self._ringer = ringer
         self._calls = CallLog(log_path or Path(get_settings().state_file))
         self._scheduler = AsyncIOScheduler(timezone="UTC")
+        self._admission = asyncio.Lock()
+        self._ringing: set[str] = set()
 
     def start(self) -> None:
         settings = get_settings()
@@ -95,34 +98,54 @@ class Coach:
             self._scheduler.shutdown(wait=False)
 
     async def sweep(self) -> list[CallOutcome]:
-        return [await self.call(user_id) for user_id in await self._memory.list_runners()]
+        return await self._call_each(await self._memory.list_runners())
 
     async def sweep_online(self) -> list[CallOutcome]:
         """Chase a check-in the runner was already due, as soon as they open the app."""
-        runners = [
-            user_id
-            for user_id in await self._memory.list_runners()
-            if self._ringer.is_online(user_id) and self._checkin_missed(user_id)
-        ]
-        return [await self.call(user_id) for user_id in runners]
+        return await self._call_each(
+            [
+                user_id
+                for user_id in await self._memory.list_runners()
+                if self._ringer.is_online(user_id) and self._checkin_missed(user_id)
+            ]
+        )
+
+    async def _call_each(self, runners: list[str]) -> list[CallOutcome]:
+        """One runner's failure must not cost everyone behind them their check-in."""
+        outcomes = []
+        for user_id in runners:
+            try:
+                outcomes.append(await self.call(user_id))
+            except Exception:
+                log.exception("call failed for %s", user_id)
+                outcomes.append(CallOutcome(user_id, False, "call failed"))
+        return outcomes
 
     async def call(self, user_id: str, *, force: bool = False) -> CallOutcome:
-        if not force and not self._ringer.is_online(user_id):
-            return CallOutcome(user_id, False, "runner is not reachable")
+        # The daily and the every-15-minutes sweep overlap whenever the check-in hour
+        # lands on a quarter hour, so admission has to be decided one runner at a time.
+        async with self._admission:
+            if not force and not self._ringer.is_online(user_id):
+                return CallOutcome(user_id, False, "runner is not reachable")
+            if user_id in self._ringing:
+                return CallOutcome(user_id, False, "a call is already being placed")
+            if not force and self._called_recently(user_id):
+                return CallOutcome(user_id, False, "already called within the cooldown")
+            self._ringing.add(user_id)
 
-        if not force and self._called_recently(user_id):
-            return CallOutcome(user_id, False, "already called within the cooldown")
-
-        state = await self._memory.get_state(user_id)
-        line = await opening_line(state)
-        reason = state.commitments[0] if state.commitments else "routine check-in"
-        delivered = await self._ringer.ring(user_id, line, reason)
-        if delivered:
-            self._calls.record(user_id, datetime.now(timezone.utc))
-            await self._memory.record_event(
-                user_id, "proactive_call_placed", {"reason": reason, "opening_line": line}
-            )
-        return CallOutcome(user_id, bool(delivered), reason, line, delivered)
+        try:
+            state = await self._memory.get_state(user_id)
+            line = await opening_line(state)
+            reason = state.commitments[0] if state.commitments else "routine check-in"
+            delivered = await self._ringer.ring(user_id, line, reason)
+            if delivered:
+                self._calls.record(user_id, datetime.now(timezone.utc))
+                await self._memory.record_event(
+                    user_id, "proactive_call_placed", {"reason": reason, "opening_line": line}
+                )
+            return CallOutcome(user_id, bool(delivered), reason, line, delivered)
+        finally:
+            self._ringing.discard(user_id)
 
     def _called_recently(self, user_id: str) -> bool:
         last = self._calls.last_call(user_id)

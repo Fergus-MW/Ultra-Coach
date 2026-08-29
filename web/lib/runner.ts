@@ -23,6 +23,12 @@ export async function identity(): Promise<Identity> {
   return { userId: created.user_id, token: created.token };
 }
 
+/** Drop a token the backend no longer accepts, so the next `identity()` registers again. */
+export function forgetIdentity(): void {
+  window.localStorage.removeItem(ID_KEY);
+  window.localStorage.removeItem(TOKEN_KEY);
+}
+
 export const apiBase = (
   process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000"
 ).replace(/\/$/, "");
