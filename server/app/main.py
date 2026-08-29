@@ -320,7 +320,7 @@ async def pull_wearable(runner_id: str) -> None:
     Nothing is pushed to us — Open Wearables delivers through Svix, which we do not
     run — so every fact the coach has arrives through a pull like this one.
     """
-    if not wearable.connected(runner_id):
+    if not wearable.user_for(runner_id):
         return
     try:
         facts = await wearable.refresh(runner_id)

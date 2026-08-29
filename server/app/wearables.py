@@ -8,6 +8,7 @@ before it knows the runner ran yesterday will simply not bother.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -41,6 +42,7 @@ class Reading:
 @dataclass
 class Snapshot:
     provider: str = ""
+    connected: bool = False
     readings: dict[str, Reading] = field(default_factory=dict)
 
     def as_block(self) -> str:
@@ -66,6 +68,7 @@ class Wearable:
         # mapping is ours to keep and has to survive a redeploy.
         self._links: dict[str, str] = {}
         self._snapshots: dict[str, Snapshot] = {}
+        self._minting: dict[str, asyncio.Lock] = {}
 
     @property
     def configured(self) -> bool:
@@ -90,39 +93,74 @@ class Wearable:
         return url
 
     async def ensure_user(self, runner_id: str) -> str:
-        """The runner as Open Wearables knows them, created once and remembered."""
-        for user_id, runner in self._links.items():
-            if runner == runner_id:
-                return user_id
-        created = await self._call("POST", "/api/v1/users", json={"first_name": "Runner"})
-        user_id = str(created.get("id") or "")
-        if not user_id:
-            raise WearableError("the wearables platform created no user")
-        await self.link(user_id, runner_id, get_settings().wearables_provider)
-        return user_id
+        """The runner as Open Wearables knows them, created once and remembered.
 
-    async def link(self, external_user_id: str, runner_id: str, provider: str = "") -> None:
+        Two tabs tapping connect together would otherwise mint two platform accounts and
+        leave the runner's data behind whichever one lost.
+        """
+        known = self.user_for(runner_id)
+        if known:
+            return known
+        async with self._minting.setdefault(runner_id, asyncio.Lock()):
+            known = self.user_for(runner_id)
+            if known:
+                return known
+            created = await self._call("POST", "/api/v1/users", json={"first_name": "Runner"})
+            user_id = str(created.get("id") or "")
+            if not user_id:
+                raise WearableError("the wearables platform created no user")
+            return await self.link(user_id, runner_id, get_settings().wearables_provider)
+
+    async def link(
+        self,
+        external_user_id: str,
+        runner_id: str,
+        provider: str = "",
+        confirmed: bool = False,
+    ) -> str:
+        """Claim this platform account for the runner, and say which one won the claim.
+
+        The database decides, not this process: another instance may already hold an
+        account for the runner, and its one is the one with the device attached.
+        """
         if not external_user_id or not runner_id:
-            return
-        known = self._links.get(external_user_id) == runner_id
-        self._links[external_user_id] = runner_id
+            return ""
+        held = await self._claim(external_user_id, runner_id, provider, confirmed)
+        self._links[held] = runner_id
+        snapshot = self._snapshot(runner_id)
         if provider:
-            self._snapshot(runner_id).provider = provider
-        if known and not provider:
-            return
-        await self._write(
-            """INSERT INTO wearable_links (external_user_id, runner_id, provider)
-               VALUES ($1, $2, $3)
-               ON CONFLICT (external_user_id)
-               DO UPDATE SET runner_id = EXCLUDED.runner_id, provider = EXCLUDED.provider""",
-            external_user_id,
-            runner_id,
-            provider,
-        )
+            snapshot.provider = provider
+        snapshot.connected = snapshot.connected or confirmed
+        return held
+
+    async def _claim(
+        self, external_user_id: str, runner_id: str, provider: str, confirmed: bool
+    ) -> str:
+        if not self._db.ready:
+            return self.user_for(runner_id) or external_user_id
+        try:
+            async with self._db.pool.acquire() as connection:
+                held = await connection.fetchval(
+                    """INSERT INTO wearable_links (external_user_id, runner_id, provider, confirmed)
+                       VALUES ($1, $2, $3, $4)
+                       ON CONFLICT (runner_id) DO UPDATE
+                       SET provider = CASE WHEN $3 = '' THEN wearable_links.provider ELSE $3 END,
+                           confirmed = wearable_links.confirmed OR $4
+                       RETURNING external_user_id""",
+                    external_user_id,
+                    runner_id,
+                    provider,
+                    confirmed,
+                )
+        except Exception:
+            log.exception("could not claim a wearable account for %s", runner_id)
+            return self.user_for(runner_id) or external_user_id
+        return str(held or external_user_id)
 
     async def unlink(self, external_user_id: str) -> str:
         runner_id = self._links.pop(external_user_id, "")
         self._snapshots.pop(runner_id, None)
+        self._minting.pop(runner_id, None)
         await self._write(
             "DELETE FROM wearable_links WHERE external_user_id = $1", external_user_id
         )
@@ -134,7 +172,25 @@ class Wearable:
         return next((user for user, runner in self._links.items() if runner == runner_id), "")
 
     def connected(self, runner_id: str) -> bool:
-        return runner_id in self._snapshots or runner_id in self._links.values()
+        """Only an authorised device counts: a runner who cancelled consent has none."""
+        snapshot = self._snapshots.get(runner_id)
+        return bool(snapshot and (snapshot.connected or snapshot.readings))
+
+    async def check_connection(self, runner_id: str) -> bool:
+        """Ask the platform whether consent actually went through."""
+        user_id = self.user_for(runner_id)
+        if not user_id:
+            return False
+        payload = await self._call("GET", f"/api/v1/users/{user_id}/connections")
+        active = [
+            connection
+            for connection in payload.get("data") or []
+            if isinstance(connection, dict) and connection.get("status") == "active"
+        ]
+        if not active:
+            return False
+        await self.link(user_id, runner_id, str(active[0].get("provider") or ""), confirmed=True)
+        return True
 
     async def record(self, runner_id: str, kind: str, payload: dict) -> str:
         """Reduce one record to a line. Returns it, or "" if there was nothing."""
@@ -144,14 +200,18 @@ class Wearable:
 
         snapshot = self._snapshot(runner_id)
         moment = _payload_time(payload)
-        existing = snapshot.readings.get(kind)
-        # The same day is rewritten all day long, and providers backfill out of order:
-        # only a newer reading of the same kind should replace what the coach has.
-        if existing and existing.at > moment:
+        # Each day, night and workout is its own reading: keyed by kind alone, a week's
+        # training would collapse into whichever run was pulled last.
+        key = _key(kind, moment)
+        existing = snapshot.readings.get(key)
+        # The same day is rewritten all day long and providers backfill out of order, so
+        # only a newer reading replaces what the coach has — and a poll that brings back
+        # a record it already holds is not news to repeat into the graph.
+        if existing and (existing.at > moment or existing.text == text):
             return ""
         provider = _provider(payload) or snapshot.provider
         snapshot.provider = provider
-        snapshot.readings[kind] = Reading(at=moment, provider=provider, text=text)
+        snapshot.readings[key] = Reading(at=moment, provider=provider, text=text)
         await self._write(
             """INSERT INTO wearable_readings (runner_id, kind, measured_at, provider, summary)
                VALUES ($1, $2, $3, $4, $5)
@@ -161,7 +221,7 @@ class Wearable:
                    summary = EXCLUDED.summary
                WHERE wearable_readings.measured_at <= EXCLUDED.measured_at""",
             runner_id,
-            kind,
+            key,
             moment,
             provider,
             text,
@@ -186,7 +246,7 @@ class Wearable:
         if not self.configured:
             return []
         user_id = self.user_for(runner_id)
-        if not user_id:
+        if not user_id or not await self.check_connection(runner_id):
             return []
 
         window = {
@@ -217,7 +277,7 @@ class Wearable:
             return
         async with self._db.pool.acquire() as connection:
             links = await connection.fetch(
-                "SELECT external_user_id, runner_id, provider FROM wearable_links"
+                "SELECT external_user_id, runner_id, provider, confirmed FROM wearable_links"
             )
             readings = await connection.fetch(
                 """SELECT runner_id, kind, measured_at, provider, summary
@@ -226,8 +286,10 @@ class Wearable:
             )
         self._links = {row["external_user_id"]: row["runner_id"] for row in links}
         for row in links:
+            snapshot = self._snapshot(row["runner_id"])
+            snapshot.connected = bool(row["confirmed"])
             if row["provider"]:
-                self._snapshot(row["runner_id"]).provider = row["provider"]
+                snapshot.provider = row["provider"]
         for row in readings:
             snapshot = self._snapshot(row["runner_id"])
             snapshot.readings[row["kind"]] = Reading(
@@ -263,9 +325,21 @@ def _headers() -> dict[str, str]:
     }
 
 
+def _key(kind: str, moment: datetime) -> str:
+    """A day and a night are one a day; workouts are one each."""
+    when = moment.isoformat() if kind == "activity" else moment.date().isoformat()
+    return f"{kind}:{when}"
+
+
 def _fresh(readings: dict[str, Reading]) -> list[Reading]:
     cutoff = datetime.now(timezone.utc) - FRESH_FOR
-    return [reading for reading in readings.values() if reading.at >= cutoff]
+    recent = sorted(
+        (reading for reading in readings.values() if reading.at >= cutoff),
+        key=lambda reading: reading.at,
+        reverse=True,
+    )
+    # A fortnight of lines read into every call would bury the numbers that matter.
+    return recent[:12]
 
 
 def _provider(payload: dict) -> str:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import os
@@ -865,21 +866,23 @@ def a_night(hours: float = 6.0) -> dict:
     }
 
 
-def a_run() -> dict:
-    now = datetime.now(timezone.utc)
+def a_run(days_ago: float = 0, km: float = 21.1) -> dict:
+    now = datetime.now(timezone.utc) - timedelta(days=days_ago)
     return {
         "source": {"provider": "fitbit"},
         "name": "Long run",
         "start_time": (now - timedelta(hours=2)).isoformat(),
         "end_time": now.isoformat(),
-        "distance_meters": 21100,
+        "distance_meters": km * 1000,
         "duration_seconds": 7500,
         "avg_heart_rate_bpm": 149,
     }
 
 
 def a_day(steps: int, hours_ago: float = 0) -> dict:
-    now = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+    # Anchored at midday so a test running near midnight still means "today".
+    noon = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+    now = noon - timedelta(hours=hours_ago)
     return {
         "source": {"provider": "fitbit"},
         "end_time": now.isoformat(),
@@ -888,12 +891,17 @@ def a_day(steps: int, hours_ago: float = 0) -> dict:
     }
 
 
-def platform(monkeypatch, wearable: Wearable, pages: dict[str, dict]) -> list[tuple[str, str]]:
+def platform(
+    monkeypatch, wearable: Wearable, pages: dict[str, dict], connected: bool = True
+) -> list[tuple[str, str]]:
     """Stand in for our Open Wearables deployment, and record what was asked of it."""
     seen: list[tuple[str, str]] = []
+    active = {"data": [{"provider": "fitbit", "status": "active"}]} if connected else {"data": []}
 
     async def call(method: str, path: str, **kwargs) -> dict:
         seen.append((method, path))
+        if path.endswith("/connections"):
+            return active
         return pages.get(path, {"data": []})
 
     monkeypatch.setattr(wearable, "_call", call)
@@ -991,6 +999,59 @@ def test_returning_from_fitbit_pulls_the_week_into_the_graph(
     assert [event[0] for event in fake_memory.events] == [runner, runner]
 
 
+def test_cancelled_consent_is_not_a_connected_watch(
+    client: TestClient, wearable: Wearable, monkeypatch
+) -> None:
+    configured = main.get_settings()
+    monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")
+    monkeypatch.setattr(configured, "wearables_api_key", "sk-test")
+    monkeypatch.setattr(configured, "pwa_url", "https://pwa.test")
+    platform(
+        monkeypatch,
+        wearable,
+        {
+            "/api/v1/users": {"id": "user-1"},
+            "/api/v1/oauth/fitbit/authorize": {"authorization_url": "https://fitbit.test/consent"},
+        },
+        connected=False,
+    )
+    identity = client.post("/api/register").json()
+    headers = {"authorization": f"Bearer {identity['token']}"}
+    runner = identity["user_id"]
+
+    client.post(f"/api/wearable/connect?user_id={runner}", headers=headers)
+    # The runner closed Fitbit's consent screen: the platform account exists, the watch
+    # does not, and the connect button has to stay.
+    status = client.get(f"/api/wearable?user_id={runner}", headers=headers).json()
+
+    assert status["connected"] is False
+
+
+def test_a_week_of_running_is_not_collapsed_into_one_run(wearable: Wearable, monkeypatch) -> None:
+    configured = main.get_settings()
+    monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")
+    monkeypatch.setattr(configured, "wearables_api_key", "sk-test")
+    ran(wearable.link("user-1", "fergus", "fitbit"))
+    platform(
+        monkeypatch,
+        wearable,
+        {
+            "/api/v1/users/user-1/events/workouts": {
+                "data": [a_run(days_ago=1, km=10.0), a_run(days_ago=3, km=32.0)]
+            }
+        },
+    )
+
+    first = ran(wearable.refresh("fergus"))
+    # A second poll brings back the same two runs: the coach has already been told.
+    again = ran(wearable.refresh("fergus"))
+
+    assert len(first) == 2
+    assert again == []
+    block = wearable.block("fergus")
+    assert "10.0 km" in block and "32.0 km" in block
+
+
 def test_wearable_data_stays_dead_without_a_platform(client: TestClient) -> None:
     identity = client.post("/api/register").json()
     headers = {"authorization": f"Bearer {identity['token']}"}
@@ -1003,7 +1064,7 @@ def test_wearable_data_stays_dead_without_a_platform(client: TestClient) -> None
 
 
 def test_one_runner_cannot_read_anothers_body(client: TestClient, wearable: Wearable) -> None:
-    ran(wearable.link("user-1", "fergus", "fitbit"))
+    ran(wearable.link("user-1", "fergus", "fitbit", confirmed=True))
     ran(wearable.record("fergus", "sleep", a_night()))
 
     mine = client.post(
@@ -1024,7 +1085,7 @@ def test_one_runner_cannot_read_anothers_body(client: TestClient, wearable: Wear
 def test_wearable_data_survives_a_redeploy() -> None:
     async def scenario(database: Database) -> str:
         writing = Wearable(database)
-        await writing.link("user-1", "fergus", "fitbit")
+        await writing.link("user-1", "fergus", "fitbit", confirmed=True)
         await writing.record("fergus", "sleep", a_night(7.25))
 
         restarted = Wearable(database)  # Render replaced the container
@@ -1034,13 +1095,31 @@ def test_wearable_data_survives_a_redeploy() -> None:
     assert "7h 15m asleep" in on_postgres(scenario)
 
 
+def test_two_tabs_cannot_fork_the_runners_watch() -> None:
+    async def scenario(database: Database) -> tuple[str, str]:
+        minted = iter(["user-a", "user-b"])
+
+        async def call(method: str, path: str, **kwargs) -> dict:
+            return {"id": next(minted)}
+
+        # Two instances, each with its own memory, connecting the same runner at once.
+        one, two = Wearable(database), Wearable(database)
+        for store in (one, two):
+            store._call = call  # type: ignore[method-assign]
+        held = await asyncio.gather(one.ensure_user("fergus"), two.ensure_user("fergus"))
+        return held[0], held[1]
+
+    first, second = on_postgres(scenario)
+    assert first == second
+
+
 def test_a_late_backfill_never_overwrites_the_newer_night() -> None:
     async def scenario(database: Database) -> str:
         store = Wearable(database)
         await store.record("fergus", "daily", a_day(14000))
         # A second process, holding the older payload, must not undo the newer row.
         other = Wearable(database)
-        await other.record("fergus", "daily", a_day(3000, hours_ago=24))
+        await other.record("fergus", "daily", a_day(3000, hours_ago=6))
 
         reread = Wearable(database)
         await reread.load()

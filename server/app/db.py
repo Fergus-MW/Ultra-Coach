@@ -25,10 +25,17 @@ CREATE TABLE IF NOT EXISTS calls (
 CREATE TABLE IF NOT EXISTS wearable_links (
     external_user_id TEXT PRIMARY KEY,
     runner_id     TEXT NOT NULL,
-    provider      TEXT NOT NULL DEFAULT ''
+    provider      TEXT NOT NULL DEFAULT '',
+    confirmed     BOOLEAN NOT NULL DEFAULT FALSE
 );
 
-CREATE INDEX IF NOT EXISTS wearable_links_runner ON wearable_links (runner_id);
+ALTER TABLE wearable_links ADD COLUMN IF NOT EXISTS confirmed BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- One platform account per runner, enforced here rather than in the process: two tabs
+-- tapping connect at once would otherwise leave a second, unauthorised account holding
+-- the runner's data.
+DROP INDEX IF EXISTS wearable_links_runner;
+CREATE UNIQUE INDEX IF NOT EXISTS wearable_links_one_per_runner ON wearable_links (runner_id);
 
 CREATE TABLE IF NOT EXISTS wearable_readings (
     runner_id   TEXT NOT NULL,
@@ -66,16 +73,20 @@ class Database:
         dsn = dsn or get_settings().database_url
         if not dsn or self._pool is not None:
             return self._pool is not None
+        pool = None
         try:
-            self._pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5, timeout=10)
-            async with self._pool.acquire() as connection:
+            pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5, timeout=10)
+            async with pool.acquire() as connection:
                 await connection.execute(SCHEMA)
         except Exception:
             # A database that will not open is worth a loud log and a degraded coach,
             # not a backend that refuses to boot and takes the calls down with it.
             log.exception("could not open the database; falling back to memory")
-            self._pool = None
-        return self._pool is not None
+            if pool is not None:
+                await pool.close()
+            return False
+        self._pool = pool
+        return True
 
     async def close(self) -> None:
         if self._pool is not None:
