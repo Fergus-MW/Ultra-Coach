@@ -1055,6 +1055,28 @@ def test_a_watch_on_last_seasons_provider_is_not_a_connection(
     assert status["connected"] is False
 
 
+def test_disconnecting_revokes_the_consent_and_forgets_the_numbers(
+    client: TestClient, wearable: Wearable, monkeypatch
+) -> None:
+    configured = main.get_settings()
+    monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")
+    monkeypatch.setattr(configured, "wearables_api_key", "sk-test")
+    monkeypatch.setattr(configured, "wearables_provider", "google")
+    identity = client.post("/api/register").json()
+    headers = {"authorization": f"Bearer {identity['token']}"}
+    runner = identity["user_id"]
+    ran(wearable.link("user-1", runner, "google", confirmed=True))
+    ran(wearable.record(runner, "sleep", a_night(5.5)))
+    seen = platform(monkeypatch, wearable, {})
+
+    status = client.post(f"/api/wearable/disconnect?user_id={runner}", headers=headers).json()
+
+    assert ("DELETE", "/api/v1/users/user-1/connections/google") in seen
+    assert status["connected"] is False
+    # The coach must not still be quoting a watch the runner has just taken away.
+    assert status["summary"] == ""
+
+
 def test_a_week_of_running_is_not_collapsed_into_one_run(wearable: Wearable, monkeypatch) -> None:
     configured = main.get_settings()
     monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")

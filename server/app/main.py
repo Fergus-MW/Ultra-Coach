@@ -411,6 +411,19 @@ async def wearable_connect(
     return {"url": url}
 
 
+@app.post("/api/wearable/disconnect")
+async def wearable_disconnect(user_id: str, authorization: str = Header(default="")) -> dict:
+    """Give the watch back: the consent is revoked and the readings dropped, so the
+    runner is offered the connection screen again."""
+    require_runner(user_id, authorization)
+    await wearable.disconnect(user_id)
+    return {
+        "available": wearable.configured,
+        "connected": wearable.connected(user_id),
+        "summary": wearable.block(user_id),
+    }
+
+
 @app.post("/tools/body-metrics", dependencies=[Depends(require_tool_secret)])
 async def tool_body_metrics(body: RunnerRef) -> dict:
     """Mid-call read of the runner's wearable, for when the coach wants more than the

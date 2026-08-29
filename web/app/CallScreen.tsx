@@ -7,6 +7,7 @@ import {
   connectWearable,
   demoCall,
   demoProducts,
+  disconnectWearable,
   forgetIdentity,
   identity,
   type Identity,
@@ -241,6 +242,20 @@ export default function CallScreen({ onProducts }: Props) {
     }
   }, []);
 
+  const unlinkWatch = useCallback(async () => {
+    const me = who.current;
+    if (!me) return;
+    setError('');
+    setBusy('watch');
+    try {
+      setWearable(await disconnectWearable(me));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy('');
+    }
+  }, []);
+
   const pushKit = useCallback(async () => {
     const me = who.current;
     if (!me) return;
@@ -331,7 +346,18 @@ export default function CallScreen({ onProducts }: Props) {
                   : 'Give it your training data'}
               </p>
               {wearable.connected ? (
-                <p className={styles.wearable}>{wearable.summary || 'Waiting for the first sync.'}</p>
+                <>
+                  <p className={styles.wearable}>
+                    {wearable.summary || 'Waiting for the first sync.'}
+                  </p>
+                  <button
+                    className={styles.demoButton}
+                    disabled={busy !== ''}
+                    onClick={() => void unlinkWatch()}
+                  >
+                    Disconnect my watch
+                  </button>
+                </>
               ) : (
                 <button
                   className={styles.demoButton}

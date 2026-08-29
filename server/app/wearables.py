@@ -157,6 +157,31 @@ class Wearable:
             return self.user_for(runner_id) or external_user_id
         return str(held or external_user_id)
 
+    async def disconnect(self, runner_id: str) -> None:
+        """Hand the consent back so the runner can grant it again.
+
+        The platform account stays, so a reconnection lands on the same history, but the
+        authorisation and every reading go: a coach quoting last month's sleep at a
+        runner who has just unplugged their watch is worse than one with no numbers.
+        """
+        user_id = self.user_for(runner_id)
+        if not user_id:
+            return
+        provider = get_settings().wearables_provider
+        try:
+            await self._call("DELETE", f"/api/v1/users/{user_id}/connections/{provider}")
+        except Exception:
+            # Consent revoked from Google's own settings is already gone from the
+            # platform; the runner still asked us to forget it here.
+            log.warning("could not revoke %s for %s on the platform", provider, runner_id)
+        snapshot = self._snapshot(runner_id)
+        snapshot.connected = False
+        snapshot.readings.clear()
+        await self._write(
+            "UPDATE wearable_links SET confirmed = FALSE WHERE runner_id = $1", runner_id
+        )
+        await self._write("DELETE FROM wearable_readings WHERE runner_id = $1", runner_id)
+
     async def unlink(self, external_user_id: str) -> str:
         runner_id = self._links.pop(external_user_id, "")
         self._snapshots.pop(runner_id, None)
@@ -320,6 +345,8 @@ class Wearable:
             response = await client.request(method, f"{base}{path}", headers=_headers(), **kwargs)
         if response.status_code >= 400:
             raise WearableError(f"the wearables platform refused: {response.text[:200]}")
+        if not response.content:
+            return {}
         body = response.json()
         return body if isinstance(body, dict) else {"data": body}
 

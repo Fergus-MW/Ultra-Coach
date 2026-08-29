@@ -149,6 +149,19 @@ export async function connectWearable(who: Identity): Promise<string> {
   return (await response.json()).url;
 }
 
+/** Revoke the consent, so the runner can grant it again from scratch. */
+export async function disconnectWearable(who: Identity): Promise<WearableStatus> {
+  const query = new URLSearchParams({ user_id: who.userId });
+  const response = await fetch(`${apiBase}/api/wearable/disconnect?${query}`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${who.token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`disconnect ${response.status}: ${await response.text()}`);
+  }
+  return response.json();
+}
+
 /**
  * Ask the coach to ring now on a chosen subject. The coach still decides what it says
  * and still uses its own tools — this only skips the wait for its own schedule, so the
