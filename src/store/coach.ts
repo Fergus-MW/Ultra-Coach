@@ -33,6 +33,8 @@ export type CoachState = {
   unseen: number;
   error: string;
   wearable: WearableStatus | null;
+  /** Bumped whenever a call starts or stops mattering, so a slow answer can tell it missed. */
+  callSeq: number;
   /** Set by the call overlay, so a cancelled call can drop a live voice session. */
   endSession: () => void;
   listen: () => void;
@@ -61,6 +63,7 @@ export const useCoach = create<CoachState>((set, get) => ({
   unseen: 0,
   error: '',
   wearable: null,
+  callSeq: 0,
   endSession: () => {},
 
   listen: () => {
@@ -86,6 +89,7 @@ export const useCoach = create<CoachState>((set, get) => ({
       set((state) => ({
         incoming: null,
         phase: state.phase === 'live' ? 'ended' : 'standby',
+        callSeq: state.callSeq + 1,
       }));
       return;
     }
@@ -99,14 +103,15 @@ export const useCoach = create<CoachState>((set, get) => ({
     }
     if (payload.type !== 'incoming_call') return;
 
-    set({
+    set((state) => ({
       incoming: {
         openingLine: 'opening_line' in payload ? (payload.opening_line ?? '') : '',
         reason: 'reason' in payload ? (payload.reason ?? '') : '',
       },
       phase: 'ringing',
       error: '',
-    });
+      callSeq: state.callSeq + 1,
+    }));
   },
 
   tell: (type) => socket?.send(JSON.stringify({ type })),
@@ -123,12 +128,12 @@ export const useCoach = create<CoachState>((set, get) => ({
 
   decline: () => {
     get().tell('call_declined');
-    set({ phase: 'standby', incoming: null });
+    set((state) => ({ phase: 'standby', incoming: null, callSeq: state.callSeq + 1 }));
   },
 
   hangUp: () => {
     get().endSession();
-    set({ phase: 'standby', incoming: null });
+    set((state) => ({ phase: 'standby', incoming: null, callSeq: state.callSeq + 1 }));
   },
 
   seenProducts: () => set({ unseen: 0 }),
@@ -144,7 +149,7 @@ export const useCoach = create<CoachState>((set, get) => ({
   },
 }));
 
-type Set = (partial: Partial<CoachState>) => void;
+type Set = (partial: Partial<CoachState> | ((state: CoachState) => Partial<CoachState>)) => void;
 type Get = () => CoachState;
 
 async function open(set: Set, get: Get): Promise<void> {
@@ -152,7 +157,10 @@ async function open(set: Set, get: Get): Promise<void> {
   try {
     who = who ?? (await identity());
   } catch (cause) {
+    // A backend that was down at launch must not leave the phone unreachable for the
+    // lifetime of the process.
     set({ error: cause instanceof Error ? cause.message : String(cause) });
+    if (!closed) retry = setTimeout(() => void open(set, get), RETRY_MS);
     return;
   }
   if (closed) return;

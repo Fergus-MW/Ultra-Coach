@@ -1,6 +1,6 @@
 import * as Linking from 'expo-linking';
-import { useState } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { AppState, ScrollView, StyleSheet, Text, View } from 'react-native';
 import {
   apiBase,
   connectWearable,
@@ -28,6 +28,14 @@ export default function CoachTab() {
   const wearable = useCoach((state) => state.wearable);
   const error = useCoach((state) => state.error);
   const [busy, setBusy] = useState('');
+
+  useEffect(() => {
+    // Consent happens in the browser, so the result only shows up when the runner comes back.
+    const subscription = AppState.addEventListener('change', (next) => {
+      if (next === 'active') void useCoach.getState().refreshWearable();
+    });
+    return () => subscription.remove();
+  }, []);
 
   const run = async (key: string, work: (me: Identity) => Promise<void>) => {
     if (!who) return;
@@ -102,7 +110,6 @@ export default function CoachTab() {
                     // The provider's own consent page, in the phone's browser: no
                     // provider credential ever reaches this app.
                     await Linking.openURL(await connectWearable(me));
-                    await useCoach.getState().refreshWearable();
                   })
                 }
               />

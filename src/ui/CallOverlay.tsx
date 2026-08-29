@@ -19,8 +19,18 @@ export function CallOverlay() {
   const error = useCoach((state) => state.error);
   const who = useCoach((state) => state.who);
 
+  // The call this phone is answering. Cancellation from another device bumps the store's
+  // counter, so an answer that was mid-await knows the call it is joining is gone.
+  const answering = useRef(0);
+
   const conversation = useConversation({
-    onConnect: () => useCoach.getState().answered(),
+    onConnect: () => {
+      if (useCoach.getState().callSeq !== answering.current) {
+        conversationRef.current.endSession();
+        return;
+      }
+      useCoach.getState().answered();
+    },
     onDisconnect: () => useCoach.setState((state) => (state.phase === 'live' ? { phase: 'ended' } : {})),
     onError: (message: string) => useCoach.setState({ error: message, phase: 'ended' }),
   });
@@ -45,12 +55,16 @@ export function CallOverlay() {
     const coach = useCoach.getState();
     coach.setError('');
     coach.setPhase('connecting');
+    const seq = coach.callSeq;
+    answering.current = seq;
     try {
       if (!who) throw new Error('no runner identity yet');
       const permission = await AudioModule.requestRecordingPermissionsAsync();
       if (!permission.granted) throw new Error('Microphone permission denied.');
 
       const grant = await requestSession(who);
+      if (useCoach.getState().callSeq !== seq) return;
+
       conversation.startSession({
         conversationToken: grant.conversation_token,
         connectionType: 'webrtc' as const,

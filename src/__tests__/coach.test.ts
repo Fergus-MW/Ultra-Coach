@@ -7,6 +7,7 @@ const CLEAN = {
   pushed: null,
   unseen: 0,
   error: '',
+  callSeq: 0,
   endSession: () => {},
 };
 
@@ -55,6 +56,14 @@ describe('the ring socket', () => {
 
     useCoach.getState().seenProducts();
     expect(useCoach.getState().unseen).toBe(0);
+  });
+
+  it('marks the call gone, so an answer still awaiting a token knows to drop it', () => {
+    useCoach.getState().receive({ type: 'incoming_call' });
+    const seq = useCoach.getState().callSeq;
+
+    useCoach.getState().receive({ type: 'call_cancelled' });
+    expect(useCoach.getState().callSeq).not.toBe(seq);
   });
 
   it('ignores anything else the backend says', () => {
