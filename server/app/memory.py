@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ class Memory:
     def __init__(self, client: AsyncZep | None = None) -> None:
         settings = get_settings()
         self._client = client or AsyncZep(api_key=settings.zep_api_key)
+        self._ingesting: dict[str, asyncio.Lock] = {}
 
     async def ensure_user(self, user_id: str) -> None:
         try:
@@ -61,6 +63,23 @@ class Memory:
 
         await self.ensure_user(user_id)
         thread_id = f"call-{conversation_id}"
+        # Retries of one delivery can arrive while the first is still adding messages,
+        # and both would then see an empty thread and write the call in twice.
+        lock = self._ingesting.setdefault(conversation_id, asyncio.Lock())
+        try:
+            async with lock:
+                await self._ingest(thread_id, conversation_id, user_id, turns)
+        finally:
+            if not lock.locked():
+                self._ingesting.pop(conversation_id, None)
+
+    async def _ingest(
+        self,
+        thread_id: str,
+        conversation_id: str,
+        user_id: str,
+        turns: list[tuple[str, str]],
+    ) -> None:
         try:
             await self._client.thread.create(thread_id=thread_id, user_id=user_id)
         except BadRequestError:

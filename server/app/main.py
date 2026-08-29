@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from .auth import bearer, issue_identity, verify, verify_webhook
+from .auth import bearer, issue_identity, sign, verify, verify_webhook
 from .config import Settings, get_settings
 from .llm import chat_completion
 from .memory import Memory
@@ -74,6 +74,13 @@ class Throttle:
             return False
         self._last[key] = now
         return True
+
+    def refund(self, key: str, previous: float) -> None:
+        """An attempt that never minted a token must not cost the runner the cooldown."""
+        self._last[key] = previous
+
+    def last(self, key: str) -> float:
+        return self._last.get(key, 0.0)
 
 
 _session_throttle = Throttle()
@@ -134,16 +141,28 @@ async def create_session(
 ) -> SessionResponse:
     """Everything the browser needs to open a call, minus any credential."""
     require_runner(body.user_id, authorization)
-    if not _session_throttle.allow(body.user_id):
-        raise HTTPException(status_code=429, detail="too many sessions")
     if not settings.elevenlabs_agent_id:
         raise HTTPException(status_code=503, detail="no agent configured")
 
-    state = await memory.get_state(body.user_id)
+    previous = _session_throttle.last(body.user_id)
+    if not _session_throttle.allow(body.user_id):
+        raise HTTPException(status_code=429, detail="too many sessions")
+
+    try:
+        state = await memory.get_state(body.user_id)
+        token = await conversation_token(settings.elevenlabs_agent_id)
+    except Exception:
+        _session_throttle.refund(body.user_id, previous)
+        raise
+
     return SessionResponse(
-        conversation_token=await conversation_token(settings.elevenlabs_agent_id),
+        conversation_token=token,
         agent_id=settings.elevenlabs_agent_id,
-        runner_state=f"runner_id={body.user_id}\n{state.as_prompt_block()}",
+        # The signature travels with the id so the LLM proxy can tell a real runner's
+        # history apart from any id a caller decides to put in the conversation.
+        runner_state=(
+            f"runner_id={body.user_id} runner_sig={sign(body.user_id)}\n{state.as_prompt_block()}"
+        ),
     )
 
 
@@ -240,8 +259,10 @@ async def runner_socket(websocket: WebSocket, user_id: str, token: str = "") -> 
             message = await websocket.receive_json()
             if message.get("type") == "call_answered":
                 await memory.record_event(user_id, "call_answered", {})
+                await ringer.cancel(user_id, except_socket=websocket)
             elif message.get("type") == "call_declined":
                 await memory.record_event(user_id, "call_declined", {})
+                await ringer.cancel(user_id, except_socket=websocket)
     except WebSocketDisconnect:
         pass
     finally:

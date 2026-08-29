@@ -39,9 +39,13 @@ class Ringer:
             {"type": "incoming_call", "opening_line": opening_line, "reason": reason},
         )
 
-    async def _send(self, user_id: str, message: dict) -> int:
+    async def cancel(self, user_id: str, except_socket: WebSocket | None = None) -> int:
+        """One tab took the call, so every other tab has to stop ringing."""
+        return await self._send(user_id, {"type": "call_cancelled"}, skip=except_socket)
+
+    async def _send(self, user_id: str, message: dict, skip: WebSocket | None = None) -> int:
         async with self._lock:
-            sockets = list(self._sockets.get(user_id, ()))
+            sockets = [s for s in self._sockets.get(user_id, ()) if s is not skip]
 
         delivered = 0
         for socket in sockets:

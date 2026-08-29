@@ -67,6 +67,13 @@ export default function CallScreen() {
       };
       next.onmessage = (event) => {
         const payload = JSON.parse(event.data);
+        if (payload.type === "call_cancelled") {
+          // Another tab took or refused the call; this one must not keep ringing.
+          silence();
+          setIncoming(null);
+          setScreen((current) => (current === "ringing" ? "standby" : current));
+          return;
+        }
         if (payload.type !== "incoming_call") return;
 
         setIncoming({ opening_line: payload.opening_line, reason: payload.reason });
@@ -93,7 +100,7 @@ export default function CallScreen() {
       socket.current?.close();
       ringtone.current?.stop();
     };
-  }, []);
+  }, [silence]);
 
   const answer = useCallback(async () => {
     silence();
@@ -109,13 +116,11 @@ export default function CallScreen() {
       conversation.startSession({
         conversationToken: grant.conversation_token,
         connectionType: "webrtc",
-        dynamicVariables: { runner_id: me.userId },
-        overrides: {
-          agent: {
-            prompt: { prompt: grant.runner_state },
-            firstMessage: incoming?.opening_line,
-          },
-        },
+        // The agent's prompt template reads {{runner_state}}; overriding the prompt
+        // itself is refused by the agent config, and would let the browser rewrite
+        // the coach's persona.
+        dynamicVariables: { runner_id: me.userId, runner_state: grant.runner_state },
+        overrides: { agent: { firstMessage: incoming?.opening_line } },
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));

@@ -340,3 +340,118 @@ def test_resolved_commitments_are_dropped() -> None:
         expired_at = "2026-01-01T00:00:00Z"
 
     assert _format_edge(Edge()) == ""
+
+
+def test_a_failed_mint_does_not_burn_the_throttle(client: TestClient, monkeypatch) -> None:
+    calls = {"n": 0}
+
+    async def token(agent_id: str) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("elevenlabs is down")
+        return "conv-token"
+
+    monkeypatch.setattr(main, "conversation_token", token)
+    monkeypatch.setattr(main.get_settings(), "elevenlabs_agent_id", "agent_1")
+
+    identity = client.post("/api/register").json()
+    headers = {"authorization": f"Bearer {identity['token']}"}
+    body = {"user_id": identity["user_id"]}
+
+    with pytest.raises(RuntimeError):
+        client.post("/api/session", json=body, headers=headers)
+    assert client.post("/api/session", json=body, headers=headers).status_code == 200
+
+
+def test_session_state_carries_a_signature_the_llm_can_check(
+    client: TestClient, monkeypatch
+) -> None:
+    async def token(agent_id: str) -> str:
+        return "conv-token"
+
+    monkeypatch.setattr(main, "conversation_token", token)
+    monkeypatch.setattr(main.get_settings(), "elevenlabs_agent_id", "agent_1")
+
+    identity = client.post("/api/register").json()
+    grant = client.post(
+        "/api/session",
+        json={"user_id": identity["user_id"]},
+        headers={"authorization": f"Bearer {identity['token']}"},
+    ).json()
+
+    assert f"runner_sig={sign(identity['user_id'])}" in grant["runner_state"]
+
+
+def test_the_llm_proxy_ignores_an_unsigned_runner_id() -> None:
+    from app.llm import _runner_from
+
+    assert _runner_from([{"role": "system", "content": "runner_id=victim"}]) == ""
+    assert (
+        _runner_from([{"role": "system", "content": f"runner_id=mine runner_sig={sign('mine')}"}])
+        == "mine"
+    )
+
+
+def test_answering_in_one_tab_stops_the_others_ringing(client: TestClient) -> None:
+    identity = client.post("/api/register").json()
+    url = f"/ws/{identity['user_id']}?token={identity['token']}"
+
+    with client.websocket_connect(url) as answering, client.websocket_connect(url) as other:
+        answering.send_json({"type": "call_answered"})
+        assert other.receive_json() == {"type": "call_cancelled"}
+
+
+def test_concurrent_deliveries_write_one_transcript() -> None:
+    import asyncio
+
+    from app.memory import Memory
+
+    class SlowZep:
+        def __init__(self) -> None:
+            self.threads: list[str] = []
+            self.batches: list[list] = []
+
+        class _User:
+            async def get(self, user_id):
+                return None
+
+        @property
+        def user(self):
+            return self._User()
+
+        @property
+        def thread(self):
+            outer = self
+
+            class _Thread:
+                async def create(self, thread_id, user_id):
+                    if thread_id in outer.threads:
+                        raise BadRequestError(body="exists")
+                    outer.threads.append(thread_id)
+
+                async def add_messages(self, thread_id, messages):
+                    await asyncio.sleep(0.01)
+                    outer.batches.append(messages)
+
+                async def get(self, thread_id, **kwargs):
+                    class Result:
+                        messages = [m for batch in outer.batches for m in batch]
+
+                    return Result()
+
+            return _Thread()
+
+    from zep_cloud.errors import BadRequestError
+
+    zep = SlowZep()
+    memory = Memory(client=zep)
+    turns = [("agent", "You skipped Sunday."), ("user", "I know.")]
+
+    async def both():
+        await asyncio.gather(
+            memory.add_transcript("fergus", "conv-1", turns),
+            memory.add_transcript("fergus", "conv-1", turns),
+        )
+
+    asyncio.run(both())
+    assert len(zep.batches) == 1

@@ -9,9 +9,20 @@ export type Identity = { userId: string; token: string };
  * owns that id, so one browser cannot listen in on another runner's calls.
  */
 export async function identity(): Promise<Identity> {
-  const userId = window.localStorage.getItem(ID_KEY);
-  const token = window.localStorage.getItem(TOKEN_KEY);
-  if (userId && token) return { userId, token };
+  const stored = readIdentity();
+  if (stored) return stored;
+
+  // Two tabs opening a fresh device would otherwise each register, splitting the
+  // runner's history between two ids, so registration happens one tab at a time.
+  if (navigator.locks) {
+    return navigator.locks.request("ultracoach.identity", () => register());
+  }
+  return register();
+}
+
+async function register(): Promise<Identity> {
+  const stored = readIdentity();
+  if (stored) return stored;
 
   const response = await fetch(`${apiBase}/api/register`, { method: "POST" });
   if (!response.ok) {
@@ -23,17 +34,41 @@ export async function identity(): Promise<Identity> {
   return { userId: created.user_id, token: created.token };
 }
 
+function readIdentity(): Identity | null {
+  const userId = window.localStorage.getItem(ID_KEY);
+  const token = window.localStorage.getItem(TOKEN_KEY);
+  return userId && token ? { userId, token } : null;
+}
+
 /** Drop a token the backend no longer accepts, so the next `identity()` registers again. */
 export function forgetIdentity(): void {
   window.localStorage.removeItem(ID_KEY);
   window.localStorage.removeItem(TOKEN_KEY);
 }
 
-export const apiBase = (
-  process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000"
-).replace(/\/$/, "");
+/**
+ * Falling back to localhost away from a developer's machine would send a runner's
+ * identity and call requests to whatever answers on their own port 8000, so the
+ * default only applies while the page itself is served locally.
+ */
+function resolveApiBase(): string {
+  const configured = process.env.NEXT_PUBLIC_API_BASE?.trim();
+  if (configured) return configured.replace(/\/$/, "");
+
+  const host = typeof window === "undefined" ? "localhost" : window.location.hostname;
+  if (host === "localhost" || host === "127.0.0.1") return "http://localhost:8000";
+
+  console.error("NEXT_PUBLIC_API_BASE is not set; falling back to this origin");
+  return "";
+}
+
+export const apiBase = resolveApiBase();
 
 export function wsUrl(path: string): string {
+  if (!apiBase) {
+    const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+    return `${scheme}://${window.location.host}${path}`;
+  }
   const base = apiBase.startsWith("https")
     ? apiBase.replace("https", "wss")
     : apiBase.replace("http", "ws");

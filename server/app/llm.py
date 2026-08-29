@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
+from .auth import verify
 from .config import get_settings
 from .grok import COACH_SYSTEM, XAI_API
 from .memory import Memory
@@ -60,7 +61,7 @@ async def _stream(client: httpx.AsyncClient, headers: dict, payload: dict) -> As
 
 async def _with_coach_context(messages: list[dict], memory: Memory) -> list[dict]:
     """Force the persona and refresh the runner state on every turn."""
-    user_id = _user_id_from(messages)
+    user_id = _runner_from(messages)
     state_block = ""
     if user_id:
         try:
@@ -80,14 +81,29 @@ async def _with_coach_context(messages: list[dict], memory: Memory) -> list[dict
     return [{"role": "system", "content": system}, *rest]
 
 
-def _user_id_from(messages: list[dict]) -> str:
-    """ElevenLabs forwards dynamic variables inside the agent's system prompt."""
+def _runner_from(messages: list[dict]) -> str:
+    """ElevenLabs forwards dynamic variables inside the agent's system prompt.
+
+    The id alone is not evidence: anything that can reach this proxy could name another
+    runner and be handed their history, so the id is only honoured with the signature
+    `/api/session` issued to the device that owns it.
+    """
     for message in messages:
         content = message.get("content") or ""
-        marker = "runner_id="
-        if marker in content:
-            return content.split(marker, 1)[1].split()[0].strip().strip(".,")
+        if "runner_id=" not in content:
+            continue
+        user_id = _field(content, "runner_id=")
+        if verify(user_id, _field(content, "runner_sig=")):
+            return user_id
+        log.warning("ignoring unsigned runner id in conversation prompt")
+        return ""
     return ""
+
+
+def _field(content: str, marker: str) -> str:
+    if marker not in content:
+        return ""
+    return content.split(marker, 1)[1].split()[0].strip().strip(".,")
 
 
 def _error_chunk(detail: str) -> bytes:
