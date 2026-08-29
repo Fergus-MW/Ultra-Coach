@@ -39,3 +39,13 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# python backend
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# next.js pwa
+web/.next/
+web/out/

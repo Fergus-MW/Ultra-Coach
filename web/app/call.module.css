@@ -1,0 +1,141 @@
+.screen {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: radial-gradient(120% 120% at 50% 0%, #16202b 0%, #05080b 60%);
+  color: #f4f7fa;
+  text-align: center;
+}
+
+.screen[data-screen="ringing"] {
+  background: radial-gradient(120% 120% at 50% 0%, #2c1b12 0%, #05080b 60%);
+}
+
+.status {
+  position: fixed;
+  top: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  color: #8ea0b1;
+}
+
+.dotOn,
+.dotOff {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.dotOn {
+  background: #3ddc84;
+}
+
+.dotOff {
+  background: #d9534f;
+}
+
+.centre {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  max-width: 420px;
+}
+
+.avatar {
+  width: 132px;
+  height: 132px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 40px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  background: #1f2c3a;
+  border: 2px solid #35485c;
+}
+
+.pulsing {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.speaking {
+  border-color: #ff8a3d;
+  box-shadow: 0 0 48px rgba(255, 138, 61, 0.45);
+}
+
+.listening {
+  border-color: #3ddc84;
+  box-shadow: 0 0 32px rgba(61, 220, 132, 0.3);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 rgba(255, 138, 61, 0);
+  }
+  50% {
+    transform: scale(1.06);
+    box-shadow: 0 0 56px rgba(255, 138, 61, 0.5);
+  }
+}
+
+.idleTitle,
+.caller {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 650;
+}
+
+.idleBody,
+.reason {
+  margin: 0;
+  color: #9fb0c0;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.error {
+  color: #ff9a92;
+  font-size: 14px;
+  word-break: break-word;
+}
+
+.actions {
+  display: flex;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.answer,
+.decline,
+.mute {
+  border: none;
+  border-radius: 999px;
+  padding: 16px 30px;
+  font-size: 17px;
+  font-weight: 600;
+  color: #06090c;
+  cursor: pointer;
+}
+
+.answer {
+  background: #3ddc84;
+}
+
+.decline {
+  background: #e2564f;
+  color: #fff;
+}
+
+.mute {
+  background: #34485c;
+  color: #eaf1f7;
+}
