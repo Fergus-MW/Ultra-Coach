@@ -1,0 +1,61 @@
+services:
+  - type: web
+    name: ultracoach-api
+    runtime: python
+    plan: starter
+    rootDir: server
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12"
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_AGENT_ID
+        sync: false
+      - key: XAI_API_KEY
+        sync: false
+      - key: ZEP_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: ELEVENLABS_WEBHOOK_SECRET
+        sync: false
+      - key: TOOL_SECRET
+        generateValue: true
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: PWA_URL
+        sync: false
+      - key: WEARABLES_URL
+        sync: false
+      - key: WEARABLES_API_KEY
+        sync: false
+      - key: WEARABLES_PROVIDER
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ultracoach-db
+          property: connectionString
+
+  - type: web
+    name: ultracoach-pwa
+    runtime: node
+    plan: starter
+    rootDir: web
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start -- --port $PORT
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NEXT_PUBLIC_API_BASE
+        sync: false
+
+databases:
+  - name: ultracoach-db
+    databaseName: ultracoach
+    user: ultracoach
+    plan: basic-256mb

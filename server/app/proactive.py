@@ -1,0 +1,206 @@
+"""The part that makes the coach proactive: it decides when to ring, not the runner."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+from .config import get_settings
+from .db import Database, database
+from .grok import opening_line
+from .memory import Memory
+from .ws import Ringer
+
+log = logging.getLogger(__name__)
+
+MIN_HOURS_BETWEEN_CALLS = 20
+# Long enough for the browser to finish opening, short enough to feel like the coach
+# noticed them arrive.
+GREETING_DELAY_SECONDS = 4
+
+
+@dataclass
+class CallOutcome:
+    user_id: str
+    rang: bool
+    reason: str
+    opening_line: str = ""
+    delivered: int = 0
+
+
+class CallLog:
+    """When each runner was last rung, in Postgres so a restart is not a free call.
+
+    Kept in memory as well, because whether a runner is due is decided the moment they
+    open the app and again every quarter of an hour for everyone at once.
+    """
+
+    def __init__(self, store: Database | None = None) -> None:
+        self._db = store or database
+        self._times: dict[str, datetime] = {}
+
+    def last_call(self, user_id: str) -> datetime | None:
+        return self._times.get(user_id)
+
+    async def record(self, user_id: str, moment: datetime) -> None:
+        self._times[user_id] = moment
+        if not self._db.ready:
+            return
+        try:
+            async with self._db.pool.acquire() as connection:
+                await connection.execute(
+                    """INSERT INTO calls (user_id, last_call) VALUES ($1, $2)
+                       ON CONFLICT (user_id) DO UPDATE SET last_call = EXCLUDED.last_call""",
+                    user_id,
+                    moment,
+                )
+        except Exception:  # the runner's phone is already ringing
+            log.exception("could not persist the call log for %s", user_id)
+
+    async def load(self) -> None:
+        if not self._db.ready:
+            return
+        async with self._db.pool.acquire() as connection:
+            rows = await connection.fetch("SELECT user_id, last_call FROM calls")
+        self._times = {row["user_id"]: row["last_call"] for row in rows}
+
+
+class Coach:
+    """Ring runners who are online and overdue a reckoning."""
+
+    def __init__(self, memory: Memory, ringer: Ringer, calls: CallLog | None = None) -> None:
+        self._memory = memory
+        self._ringer = ringer
+        self._calls = calls or CallLog()
+        self._scheduler = AsyncIOScheduler(timezone="UTC")
+        self._admission = asyncio.Lock()
+        self._ringing: set[str] = set()
+        self._greetings: set[asyncio.Task] = set()
+
+    async def restore(self) -> None:
+        """Load who has already been called, so a redeploy is not a second call."""
+        await self._calls.load()
+
+    def start(self) -> None:
+        settings = get_settings()
+        if not settings.scheduler_enabled:
+            return
+        self._scheduler.add_job(
+            self.sweep,
+            CronTrigger(hour=settings.checkin_hour_utc, minute=0),
+            id="daily-checkin",
+            replace_existing=True,
+        )
+        self._scheduler.add_job(
+            self.sweep_online,
+            CronTrigger(minute="*/15"),
+            id="catch-them-online",
+            replace_existing=True,
+        )
+        self._scheduler.start()
+
+    def shutdown(self) -> None:
+        if self._scheduler.running:
+            self._scheduler.shutdown(wait=False)
+
+    async def sweep(self) -> list[CallOutcome]:
+        return await self._call_each(await self._memory.list_runners())
+
+    async def sweep_online(self) -> list[CallOutcome]:
+        """Chase a check-in the runner was already due, as soon as they open the app."""
+        return await self._call_each(
+            [
+                user_id
+                for user_id in await self._memory.list_runners()
+                if self._ringer.is_online(user_id) and self._checkin_missed(user_id)
+            ]
+        )
+
+    def on_connect(self, user_id: str) -> None:
+        """A runner who opens the app and is owed a check-in gets rung there and then.
+
+        Waiting for the next quarter-hour sweep would leave them staring at a screen
+        with nothing to press — the app is supposed to start the conversation.
+        """
+        if not get_settings().scheduler_enabled:
+            return
+        if not self._checkin_missed(user_id) and self._calls.last_call(user_id) is not None:
+            return
+
+        async def ring_shortly() -> None:
+            await asyncio.sleep(GREETING_DELAY_SECONDS)
+            try:
+                await self.call(user_id)
+            except Exception:
+                log.exception("greeting call failed for %s", user_id)
+
+        task = asyncio.ensure_future(ring_shortly())
+        self._greetings.add(task)
+        task.add_done_callback(self._greetings.discard)
+
+    async def _call_each(self, runners: list[str]) -> list[CallOutcome]:
+        """One runner's failure must not cost everyone behind them their check-in."""
+        outcomes = []
+        for user_id in runners:
+            try:
+                outcomes.append(await self.call(user_id))
+            except Exception:
+                log.exception("call failed for %s", user_id)
+                outcomes.append(CallOutcome(user_id, False, "call failed"))
+        return outcomes
+
+    async def call(self, user_id: str, *, force: bool = False, nudge: str = "") -> CallOutcome:
+        # The daily and the every-15-minutes sweep overlap whenever the check-in hour
+        # lands on a quarter hour, so admission has to be decided one runner at a time.
+        async with self._admission:
+            if not force and not self._ringer.is_online(user_id):
+                return CallOutcome(user_id, False, "runner is not reachable")
+            if user_id in self._ringing:
+                return CallOutcome(user_id, False, "a call is already being placed")
+            if not force and self._called_recently(user_id):
+                return CallOutcome(user_id, False, "already called within the cooldown")
+            self._ringing.add(user_id)
+
+        try:
+            state = await self._memory.get_state(user_id)
+            line = await opening_line(state, nudge)
+            reason = state.commitments[0] if state.commitments else "routine check-in"
+            delivered = await self._ringer.ring(user_id, line, reason)
+            if delivered:
+                await self._calls.record(user_id, datetime.now(timezone.utc))
+                # The runner's phone is already ringing. A history write that fails
+                # afterwards is a gap in the graph, not a call that did not happen.
+                try:
+                    await self._memory.record_event(
+                        user_id, "proactive_call_placed", {"reason": reason, "opening_line": line}
+                    )
+                except Exception:
+                    log.exception("rang %s but could not record the call", user_id)
+            return CallOutcome(user_id, bool(delivered), reason, line, delivered)
+        finally:
+            self._ringing.discard(user_id)
+
+    def _called_recently(self, user_id: str) -> bool:
+        last = self._calls.last_call(user_id)
+        if last is None:
+            return False
+        return datetime.now(timezone.utc) - last < timedelta(hours=MIN_HOURS_BETWEEN_CALLS)
+
+    def _checkin_missed(self, user_id: str) -> bool:
+        """True once today's check-in hour has passed with no call since it came round."""
+        now = datetime.now(timezone.utc)
+        due = datetime.combine(
+            date(now.year, now.month, now.day),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        ) + timedelta(hours=get_settings().checkin_hour_utc)
+        if now < due:
+            return False
+
+        last = self._calls.last_call(user_id)
+        return last is None or last < due
