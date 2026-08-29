@@ -52,7 +52,7 @@ def bearer(header: str) -> str:
 
 
 def verify_webhook(secret: str, signature_header: str, body: bytes, scheme: str = "v0") -> bool:
-    """ElevenLabs sends `t=<unix>,v0=<hmac of "t.body">`; other senders use another scheme.
+    """ElevenLabs sends `t=<unix>,v0=<hmac of "t.body">`.
 
     The timestamp is signed but also checked for age: without that, a captured delivery
     stays valid forever and can be replayed into a runner's history at any time.

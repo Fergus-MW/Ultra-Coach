@@ -23,7 +23,6 @@ from app.wearables import Wearable
 
 TOOL_SECRET = "shhh"
 WEBHOOK_SECRET = "hook"
-WEARABLE_SECRET = "wearable-hook"
 TOOL_HEADERS = {"x-tool-secret": TOOL_SECRET}
 
 
@@ -115,7 +114,8 @@ def settings(monkeypatch):
     monkeypatch.setattr(configured, "tool_secret", TOOL_SECRET)
     monkeypatch.setattr(configured, "session_secret", "signing-key")
     monkeypatch.setattr(configured, "elevenlabs_webhook_secret", WEBHOOK_SECRET)
-    monkeypatch.setattr(configured, "wearables_webhook_secret", WEARABLE_SECRET)
+    monkeypatch.setattr(configured, "wearables_url", "")
+    monkeypatch.setattr(configured, "wearables_api_key", "")
     monkeypatch.setattr(configured, "database_url", "")
     monkeypatch.setattr(main.coach, "_calls", CallLog(Database()))
     return configured
@@ -852,55 +852,63 @@ def test_the_runners_history_is_read_once_per_call(monkeypatch) -> None:
     assert reads == ["fergus"]
 
 
-def wearable_signed(payload: dict) -> tuple[bytes, dict[str, str]]:
-    body = json.dumps(payload).encode()
-    timestamp = str(int(time.time()))
-    digest = hmac.new(WEARABLE_SECRET.encode(), f"{timestamp}.".encode() + body, sha256).hexdigest()
-    return body, {
-        "content-type": "application/json",
-        "x-webhook-signature": f"t={timestamp},v1={digest}",
-    }
-
-
 def a_night(hours: float = 6.0) -> dict:
     now = datetime.now(timezone.utc)
     return {
-        "metadata": {
-            "start_time": (now - timedelta(hours=hours)).isoformat(),
-            "end_time": now.isoformat(),
-            "summary_id": "night-1",
-        },
-        "sleep_durations_data": {
-            "asleep": {"duration_asleep_state_seconds": hours * 3600},
-            "sleep_efficiency": 0.84,
-        },
-        "scores": {"sleep": 61},
+        "date": now.date().isoformat(),
+        "source": {"provider": "fitbit"},
+        "start_time": (now - timedelta(hours=hours)).isoformat(),
+        "end_time": now.isoformat(),
+        "duration_minutes": hours * 60,
+        "efficiency_percent": 84,
+        "avg_heart_rate_bpm": 49,
     }
 
 
-def test_wearable_payloads_reach_the_runners_prompt(wearable: Wearable) -> None:
-    ran(wearable.link("device-1", "fergus", "Fitbit"))
+def a_run() -> dict:
+    now = datetime.now(timezone.utc)
+    return {
+        "source": {"provider": "fitbit"},
+        "name": "Long run",
+        "start_time": (now - timedelta(hours=2)).isoformat(),
+        "end_time": now.isoformat(),
+        "distance_meters": 21100,
+        "duration_seconds": 7500,
+        "avg_heart_rate_bpm": 149,
+    }
+
+
+def a_day(steps: int, hours_ago: float = 0) -> dict:
+    now = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+    return {
+        "source": {"provider": "fitbit"},
+        "end_time": now.isoformat(),
+        "steps": steps,
+        "heart_rate": {"resting_bpm": 46},
+    }
+
+
+def platform(monkeypatch, wearable: Wearable, pages: dict[str, dict]) -> list[tuple[str, str]]:
+    """Stand in for our Open Wearables deployment, and record what was asked of it."""
+    seen: list[tuple[str, str]] = []
+
+    async def call(method: str, path: str, **kwargs) -> dict:
+        seen.append((method, path))
+        return pages.get(path, {"data": []})
+
+    monkeypatch.setattr(wearable, "_call", call)
+    return seen
+
+
+def test_wearable_records_reach_the_runners_prompt(wearable: Wearable) -> None:
+    ran(wearable.link("user-1", "fergus", "fitbit"))
     ran(wearable.record("fergus", "sleep", a_night(5.5)))
-    ran(
-        wearable.record(
-            "fergus",
-            "activity",
-            {
-                "metadata": {
-                    "start_time": datetime.now(timezone.utc).isoformat(),
-                    "name": "Long run",
-                },
-                "distance_data": {"distance_meters": 21100},
-                "active_durations_data": {"activity_seconds": 7500},
-                "heart_rate_data": {"summary": {"avg_hr_bpm": 149}},
-            },
-        )
-    )
+    ran(wearable.record("fergus", "activity", a_run()))
 
     block = wearable.block("fergus")
 
     assert "Fitbit" in block
-    assert "5h 30m asleep" in block and "sleep score 61" in block
+    assert "5h 30m asleep" in block and "84% efficiency" in block
     assert "21.1 km" in block and "5:55 per km" in block
     assert (
         block
@@ -912,57 +920,75 @@ def test_wearable_payloads_reach_the_runners_prompt(wearable: Wearable) -> None:
 
 def test_a_stale_night_is_not_read_out_as_news(wearable: Wearable) -> None:
     old = a_night()
-    old["metadata"]["end_time"] = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    old["end_time"] = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     ran(wearable.record("fergus", "sleep", old))
 
     assert wearable.block("fergus") == ""
 
 
 def test_a_resent_day_updates_rather_than_duplicates(wearable: Wearable) -> None:
-    now = datetime.now(timezone.utc)
-    partial = {
-        "metadata": {"end_time": (now - timedelta(hours=6)).isoformat()},
-        "distance_data": {"steps": 3000},
-    }
-    complete = {"metadata": {"end_time": now.isoformat()}, "distance_data": {"steps": 14000}}
-
-    ran(wearable.record("fergus", "daily", complete))
+    ran(wearable.record("fergus", "daily", a_day(14000)))
     # Providers backfill out of order, and yesterday's half-day must not overwrite today.
-    ran(wearable.record("fergus", "daily", partial))
+    ran(wearable.record("fergus", "daily", a_day(3000, hours_ago=6)))
 
     block = wearable.block("fergus")
     assert "14,000 steps" in block
     assert "3,000 steps" not in block
 
 
-def test_wearable_webhook_records_the_data_for_the_right_runner(
-    client: TestClient, wearable: Wearable, fake_memory: FakeMemory
+def test_connecting_creates_the_runner_once_and_asks_for_fitbit(
+    client: TestClient, wearable: Wearable, monkeypatch
 ) -> None:
-    ran(wearable.link("device-1", "fergus", "Fitbit"))
-    body, headers = wearable_signed(
-        {"type": "sleep", "user": {"user_id": "device-1"}, "data": [a_night()]}
+    configured = main.get_settings()
+    monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")
+    monkeypatch.setattr(configured, "wearables_api_key", "sk-test")
+    monkeypatch.setattr(configured, "pwa_url", "https://pwa.test")
+    seen = platform(
+        monkeypatch,
+        wearable,
+        {
+            "/api/v1/users": {"id": "0d2f-user"},
+            "/api/v1/oauth/fitbit/authorize": {"authorization_url": "https://fitbit.test/consent"},
+        },
+    )
+    identity = client.post("/api/register").json()
+    headers = {"authorization": f"Bearer {identity['token']}"}
+    runner = identity["user_id"]
+
+    first = client.post(f"/api/wearable/connect?user_id={runner}", headers=headers)
+    second = client.post(f"/api/wearable/connect?user_id={runner}", headers=headers)
+
+    assert first.json() == {"url": "https://fitbit.test/consent"}
+    assert second.json() == first.json()
+    # The runner is minted once: a second tap must reuse them, not fork their history.
+    assert [path for method, path in seen if method == "POST"] == ["/api/v1/users"]
+    assert wearable.user_for(runner) == "0d2f-user"
+
+
+def test_returning_from_fitbit_pulls_the_week_into_the_graph(
+    client: TestClient, wearable: Wearable, fake_memory: FakeMemory, monkeypatch
+) -> None:
+    configured = main.get_settings()
+    monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")
+    monkeypatch.setattr(configured, "wearables_api_key", "sk-test")
+    identity = client.post("/api/register").json()
+    headers = {"authorization": f"Bearer {identity['token']}"}
+    runner = identity["user_id"]
+    ran(wearable.link("user-1", runner, "fitbit"))
+    platform(
+        monkeypatch,
+        wearable,
+        {
+            "/api/v1/users/user-1/summaries/sleep": {"data": [a_night(7.0)]},
+            "/api/v1/users/user-1/events/workouts": {"data": [a_run()]},
+        },
     )
 
-    response = client.post("/webhooks/wearables", content=body, headers=headers)
+    status = client.get(f"/api/wearable?user_id={runner}", headers=headers).json()
 
-    assert response.json() == {"status": "recorded", "recorded": 1}
-    assert "asleep" in wearable.block("fergus")
-    assert fake_memory.events[0][0] == "fergus"
-
-
-def test_wearable_webhook_refuses_an_unsigned_payload(
-    client: TestClient, wearable: Wearable
-) -> None:
-    ran(wearable.link("device-1", "fergus", "Fitbit"))
-
-    response = client.post(
-        "/webhooks/wearables",
-        json={"type": "sleep", "user": {"user_id": "device-1"}, "data": [a_night()]},
-        headers={"x-webhook-signature": "t=1700000000,v1=deadbeef"},
-    )
-
-    assert response.status_code == 401
-    assert wearable.block("fergus") == ""
+    assert status["connected"] is True
+    assert "7h 00m asleep" in status["summary"] and "21.1 km" in status["summary"]
+    assert [event[0] for event in fake_memory.events] == [runner, runner]
 
 
 def test_wearable_data_stays_dead_without_a_platform(client: TestClient) -> None:
@@ -977,7 +1003,7 @@ def test_wearable_data_stays_dead_without_a_platform(client: TestClient) -> None
 
 
 def test_one_runner_cannot_read_anothers_body(client: TestClient, wearable: Wearable) -> None:
-    ran(wearable.link("device-1", "fergus", "Fitbit"))
+    ran(wearable.link("user-1", "fergus", "fitbit"))
     ran(wearable.record("fergus", "sleep", a_night()))
 
     mine = client.post(
@@ -998,36 +1024,24 @@ def test_one_runner_cannot_read_anothers_body(client: TestClient, wearable: Wear
 def test_wearable_data_survives_a_redeploy() -> None:
     async def scenario(database: Database) -> str:
         writing = Wearable(database)
-        await writing.link("device-1", "fergus", "Fitbit")
+        await writing.link("user-1", "fergus", "fitbit")
         await writing.record("fergus", "sleep", a_night(7.25))
 
         restarted = Wearable(database)  # Render replaced the container
         await restarted.load()
-        return restarted.block(restarted.runner_for("device-1"))
+        return restarted.block("fergus")
 
     assert "7h 15m asleep" in on_postgres(scenario)
 
 
 def test_a_late_backfill_never_overwrites_the_newer_night() -> None:
-    now = datetime.now(timezone.utc)
-
     async def scenario(database: Database) -> str:
         store = Wearable(database)
-        await store.record(
-            "fergus",
-            "daily",
-            {"metadata": {"end_time": now.isoformat()}, "distance_data": {"steps": 14000}},
-        )
+        await store.record("fergus", "daily", a_day(14000))
         # A second process, holding the older payload, must not undo the newer row.
         other = Wearable(database)
-        await other.record(
-            "fergus",
-            "daily",
-            {
-                "metadata": {"end_time": (now - timedelta(days=1)).isoformat()},
-                "distance_data": {"steps": 3000},
-            },
-        )
+        await other.record("fergus", "daily", a_day(3000, hours_ago=24))
+
         reread = Wearable(database)
         await reread.load()
         return reread.block("fergus")

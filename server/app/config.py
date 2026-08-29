@@ -21,8 +21,6 @@ class Settings(BaseSettings):
     wearables_url: str = ""
     """Our own Open Wearables deployment. Unset means the coach has no device data."""
     wearables_api_key: str = ""
-    wearables_webhook_secret: str = ""
-    """Signs the sync webhooks. Unset means wearable payloads are refused."""
 
     tool_secret: str = ""
     """Shared secret the ElevenLabs agent sends on server tool calls."""

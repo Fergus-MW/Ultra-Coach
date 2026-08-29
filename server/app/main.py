@@ -314,10 +314,37 @@ async def demo_call(
     return {"rang": outcome.rang, "opening_line": outcome.opening_line}
 
 
+async def pull_wearable(runner_id: str) -> None:
+    """Pull the week off the platform and put anything new into the graph.
+
+    Nothing is pushed to us — Open Wearables delivers through Svix, which we do not
+    run — so every fact the coach has arrives through a pull like this one.
+    """
+    if not wearable.connected(runner_id):
+        return
+    try:
+        facts = await wearable.refresh(runner_id)
+    except Exception:
+        log.exception("could not refresh wearable data for %s", runner_id)
+        return
+    # The graph is what the coach reasons over between calls, so the week's training
+    # load belongs in it and not only in the prompt block.
+    for kind, fact in facts:
+        try:
+            await memory.record_event(runner_id, f"wearable_{kind}", {"summary": fact})
+        except Exception:
+            log.exception("could not record %s data for %s", kind, runner_id)
+
+
 @app.get("/api/wearable")
 async def wearable_status(user_id: str, authorization: str = Header(default="")) -> dict:
-    """What the coach can see off the runner's watch, and whether there is one."""
+    """What the coach can see off the runner's watch, and whether there is one.
+
+    The PWA polls this when the tab comes back, which is the moment the runner returns
+    from Fitbit's consent screen: pull first, so the answer is not an empty watch.
+    """
     require_runner(user_id, authorization)
+    await pull_wearable(user_id)
     return {
         "available": wearable.configured,
         "connected": wearable.connected(user_id),
@@ -340,64 +367,13 @@ async def wearable_connect(
     return {"url": url}
 
 
-@app.post("/webhooks/wearables")
-async def wearable_payload(
-    request: Request,
-    x_webhook_signature: str = Header(default=""),
-    settings: Settings = Depends(get_settings),
-) -> dict:
-    """Every wearable sync lands here: the runner's own numbers, unasked for.
-
-    Unsigned payloads are refused, because these numbers become the facts the coach
-    confronts the runner with — anyone who could post here could invent their week.
-    """
-    raw = await request.body()
-    if not settings.wearables_webhook_secret:
-        raise HTTPException(status_code=503, detail="WEARABLES_WEBHOOK_SECRET is not configured")
-    if not verify_webhook(settings.wearables_webhook_secret, x_webhook_signature, raw, scheme="v1"):
-        raise HTTPException(status_code=401, detail="bad webhook signature")
-
-    payload = await request.json()
-    kind = payload.get("type", "")
-    who = payload.get("user") or {}
-    external_user_id = str(who.get("user_id") or "")
-    runner_id = wearable.runner_for(external_user_id, str(who.get("reference_id") or ""))
-    # Payloads are addressed by the platform's own user id, and the reference id is the
-    # runner id we gave it: an unknown runner is a stale connection, not an attack.
-    if not runner_id:
-        return {"status": "unknown runner", "recorded": 0}
-
-    if kind == "auth":
-        await wearable.link(external_user_id, runner_id, str(who.get("provider") or ""))
-        await wearable.refresh(runner_id)
-        return {"status": "linked", "recorded": 0}
-    if kind in ("deauth", "access_revoked"):
-        await wearable.unlink(external_user_id)
-        return {"status": "unlinked", "recorded": 0}
-
-    await wearable.link(external_user_id, runner_id, str(who.get("provider") or ""))
-    facts = [
-        text
-        for item in payload.get("data") or []
-        if isinstance(item, dict) and (text := await wearable.record(runner_id, kind, item))
-    ]
-    # The graph is what the coach reasons over between calls, so the week's training
-    # load belongs in it and not only in the prompt block.
-    for text in facts:
-        try:
-            await memory.record_event(runner_id, f"wearable_{kind}", {"summary": text})
-        except Exception:
-            log.exception("could not record %s data for %s", kind, runner_id)
-    return {"status": "recorded", "recorded": len(facts)}
-
-
 @app.post("/tools/body-metrics", dependencies=[Depends(require_tool_secret)])
 async def tool_body_metrics(body: RunnerRef) -> dict:
     """Mid-call read of the runner's wearable, for when the coach wants more than the
     block it opened with."""
     if not verify(body.runner_id, body.runner_sig):
         raise HTTPException(status_code=401, detail="unsigned runner id")
-    await wearable.refresh(body.runner_id)
+    await pull_wearable(body.runner_id)
     return {"spoken_summary": wearable.spoken(body.runner_id)}
 
 

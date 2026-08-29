@@ -1,9 +1,9 @@
 """The runner's Fitbit, normalised.
 
-Our Open Wearables deployment pushes a payload every time a device syncs, so the coach
-does not have to ask anyone how they slept. Each payload is reduced to a handful of
-spoken facts, kept per runner, and read straight into the prompt at call time — a coach
-that has to call a tool before it knows the runner ran yesterday will simply not bother.
+Our own Open Wearables deployment holds the device data, already unified across
+providers. We pull the last week of it, reduce each kind to a handful of spoken facts
+and read those straight into the prompt at call time — a coach that has to call a tool
+before it knows the runner ran yesterday will simply not bother.
 """
 
 from __future__ import annotations
@@ -20,9 +20,10 @@ from .db import Database, database
 
 log = logging.getLogger(__name__)
 
-# A day is resent as more of it syncs, and a week-old resting heart rate is not what
+# A day is rewritten as more of it syncs, and a week-old resting heart rate is not what
 # the coach should be shouting about.
 FRESH_FOR = timedelta(days=8)
+PROVIDER = "fitbit"
 
 
 class WearableError(RuntimeError):
@@ -31,7 +32,7 @@ class WearableError(RuntimeError):
 
 @dataclass
 class Reading:
-    """One kind of payload — a day, a night, a run — as the coach would say it."""
+    """One kind of record — a day, a night, a run — as the coach would say it."""
 
     at: datetime
     provider: str
@@ -62,6 +63,8 @@ class Wearable:
 
     def __init__(self, store: Database | None = None) -> None:
         self._db = store or database
+        # Open Wearables user id -> our runner id. It mints its own user ids, so the
+        # mapping is ours to keep and has to survive a redeploy.
         self._links: dict[str, str] = {}
         self._snapshots: dict[str, Snapshot] = {}
 
@@ -71,28 +74,32 @@ class Wearable:
         return bool(settings.wearables_url and settings.wearables_api_key)
 
     async def connect_url(self, runner_id: str, redirect_to: str) -> str:
-        """A connection session the runner finishes in a new tab: no credentials of ours."""
+        """Fitbit's own consent screen, opened in a new tab: no credentials of ours."""
         if not self.configured:
             raise WearableError("no wearables platform is configured")
 
-        settings = get_settings()
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                f"{settings.wearables_url.rstrip('/')}/api/v1/connections/sessions",
-                headers=_headers(),
-                json={
-                    # Sent back on every payload, which is how a sync finds its way to
-                    # the right runner without us storing anything up front.
-                    "reference_id": runner_id,
-                    "redirect_url": redirect_to,
-                },
-            )
-        if response.status_code >= 400:
-            raise WearableError(f"the wearables platform refused: {response.text[:200]}")
-        url = response.json().get("url", "")
+        user_id = await self.ensure_user(runner_id)
+        payload = await self._call(
+            "GET",
+            f"/api/v1/oauth/{PROVIDER}/authorize",
+            params={"user_id": user_id, "redirect_uri": redirect_to},
+        )
+        url = str(payload.get("authorization_url") or "")
         if not url:
-            raise WearableError("the wearables platform returned no url")
+            raise WearableError("the wearables platform returned no authorization url")
         return url
+
+    async def ensure_user(self, runner_id: str) -> str:
+        """The runner as Open Wearables knows them, created once and remembered."""
+        for user_id, runner in self._links.items():
+            if runner == runner_id:
+                return user_id
+        created = await self._call("POST", "/api/v1/users", json={"first_name": "Runner"})
+        user_id = str(created.get("id") or "")
+        if not user_id:
+            raise WearableError("the wearables platform created no user")
+        await self.link(user_id, runner_id, PROVIDER)
+        return user_id
 
     async def link(self, external_user_id: str, runner_id: str, provider: str = "") -> None:
         if not external_user_id or not runner_id:
@@ -123,15 +130,14 @@ class Wearable:
             await self._write("DELETE FROM wearable_readings WHERE runner_id = $1", runner_id)
         return runner_id
 
-    def runner_for(self, external_user_id: str, reference_id: str = "") -> str:
-        """The reference id rides on most payloads; the stored link covers the rest."""
-        return self._links.get(external_user_id) or reference_id
+    def user_for(self, runner_id: str) -> str:
+        return next((user for user, runner in self._links.items() if runner == runner_id), "")
 
     def connected(self, runner_id: str) -> bool:
         return runner_id in self._snapshots or runner_id in self._links.values()
 
     async def record(self, runner_id: str, kind: str, payload: dict) -> str:
-        """Reduce one sync payload to a line. Returns it, or "" if there was nothing."""
+        """Reduce one record to a line. Returns it, or "" if there was nothing."""
         text = _summarise(kind, payload)
         if not text:
             return ""
@@ -139,7 +145,7 @@ class Wearable:
         snapshot = self._snapshot(runner_id)
         moment = _payload_time(payload)
         existing = snapshot.readings.get(kind)
-        # The same day is resent all day long, and providers backfill out of order:
+        # The same day is rewritten all day long, and providers backfill out of order:
         # only a newer reading of the same kind should replace what the coach has.
         if existing and existing.at > moment:
             return ""
@@ -172,35 +178,37 @@ class Wearable:
             return "No wearable connected, so there are no numbers to hide behind or to use."
         return block
 
-    async def refresh(self, runner_id: str, days: int = 7) -> int:
-        """Pull the last week synchronously, for when a sync has not been pushed yet."""
-        if not self.configured:
-            return 0
-        external_user_id = next(
-            (external for external, runner in self._links.items() if runner == runner_id), ""
-        )
-        if not external_user_id:
-            return 0
+    async def refresh(self, runner_id: str, days: int = 7) -> list[tuple[str, str]]:
+        """Pull the last week: nothing is pushed to us, so this is where data arrives.
 
-        start = (date.today() - timedelta(days=days)).isoformat()
-        found = 0
-        base = get_settings().wearables_url.rstrip("/")
-        async with httpx.AsyncClient(timeout=30) as client:
-            for kind in ("daily", "sleep", "activity"):
-                try:
-                    response = await client.get(
-                        f"{base}/api/v1/{kind}",
-                        headers=_headers(),
-                        params={"user_id": external_user_id, "start_date": start},
-                    )
-                    response.raise_for_status()
-                    payloads = response.json().get("data") or []
-                except Exception as error:  # one dead endpoint must not lose the others
-                    log.warning("%s refresh failed for %s: %s", kind, runner_id, error)
-                    continue
-                for payload in payloads:
-                    if await self.record(runner_id, kind, payload):
-                        found += 1
+        Returns the (kind, fact) pairs that were new, for the graph to keep.
+        """
+        if not self.configured:
+            return []
+        user_id = self.user_for(runner_id)
+        if not user_id:
+            return []
+
+        window = {
+            "start_date": (date.today() - timedelta(days=days)).isoformat(),
+            "end_date": date.today().isoformat(),
+        }
+        found: list[tuple[str, str]] = []
+        for kind, path in (
+            ("daily", f"/api/v1/users/{user_id}/summaries/activity"),
+            ("sleep", f"/api/v1/users/{user_id}/summaries/sleep"),
+            ("activity", f"/api/v1/users/{user_id}/events/workouts"),
+        ):
+            try:
+                payload = await self._call("GET", path, params=window)
+            except Exception as error:  # one dead endpoint must not lose the others
+                log.warning("%s refresh failed for %s: %s", kind, runner_id, error)
+                continue
+            for record in payload.get("data") or []:
+                if isinstance(record, dict) and (
+                    fact := await self.record(runner_id, kind, record)
+                ):
+                    found.append((kind, fact))
         return found
 
     async def load(self) -> None:
@@ -226,6 +234,15 @@ class Wearable:
                 at=row["measured_at"], provider=row["provider"], text=row["summary"]
             )
 
+    async def _call(self, method: str, path: str, **kwargs: Any) -> dict:
+        base = get_settings().wearables_url.rstrip("/")
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.request(method, f"{base}{path}", headers=_headers(), **kwargs)
+        if response.status_code >= 400:
+            raise WearableError(f"the wearables platform refused: {response.text[:200]}")
+        body = response.json()
+        return body if isinstance(body, dict) else {"data": body}
+
     def _snapshot(self, runner_id: str) -> Snapshot:
         return self._snapshots.setdefault(runner_id, Snapshot())
 
@@ -235,14 +252,13 @@ class Wearable:
         try:
             async with self._db.pool.acquire() as connection:
                 await connection.execute(statement, *args)
-        except Exception:  # a dropped connection must not fail the webhook
+        except Exception:  # a dropped connection must not lose the call
             log.exception("could not persist wearable data")
 
 
 def _headers() -> dict[str, str]:
-    settings = get_settings()
     return {
-        "Authorization": f"Bearer {settings.wearables_api_key}",
+        "X-Open-Wearables-API-Key": get_settings().wearables_api_key,
         "Content-Type": "application/json",
     }
 
@@ -253,17 +269,18 @@ def _fresh(readings: dict[str, Reading]) -> list[Reading]:
 
 
 def _provider(payload: dict) -> str:
-    device = payload.get("device_data") or {}
-    return str(device.get("manufacturer") or device.get("name") or "").title()
+    source = payload.get("source") or {}
+    return str(source.get("provider") or "").title()
 
 
 def _payload_time(payload: dict) -> datetime:
-    metadata = payload.get("metadata") or {}
     for key in ("end_time", "start_time"):
-        moment = _time(metadata.get(key))
+        moment = _time(payload.get(key))
         if moment:
             return moment
-    return datetime.now(timezone.utc)
+    day = _time(payload.get("date"))
+    # A daily summary is dated, not timed, and the coach only cares which day it was.
+    return day or datetime.now(timezone.utc)
 
 
 def _time(value: Any) -> datetime | None:
@@ -287,55 +304,50 @@ def _summarise(kind: str, payload: dict) -> str:
 
 
 def _daily(payload: dict) -> str:
-    distance = payload.get("distance_data") or {}
-    heart = ((payload.get("heart_rate_data") or {}).get("summary")) or {}
+    heart = payload.get("heart_rate") or {}
     parts = []
-    steps = _number(distance.get("steps"))
+    steps = _number(payload.get("steps"))
     if steps:
         parts.append(f"{steps:,.0f} steps")
-    resting = _number(heart.get("resting_hr_bpm"))
+    resting = _number(heart.get("resting_bpm"))
     if resting:
         parts.append(f"resting heart rate {resting:.0f} bpm")
-    hrv = _number(heart.get("avg_hrv_rmssd"))
-    if hrv:
-        parts.append(f"HRV {hrv:.0f} ms")
-    active = _number((payload.get("calories_data") or {}).get("net_activity_calories"))
+    active = _number(payload.get("active_calories_kcal"))
     if active:
         parts.append(f"{active:,.0f} active calories")
+    minutes = _number(payload.get("active_minutes"))
+    if minutes:
+        parts.append(f"{minutes:.0f} active minutes")
     if not parts:
         return ""
     return f"{_day(payload)}: " + ", ".join(parts) + "."
 
 
 def _sleep(payload: dict) -> str:
-    durations = payload.get("sleep_durations_data") or {}
-    asleep = _number((durations.get("asleep") or {}).get("duration_asleep_state_seconds"))
     parts = []
+    asleep = _number(payload.get("duration_minutes"))
     if asleep:
-        parts.append(f"{_hours(asleep)} asleep")
-    score = _number((payload.get("scores") or {}).get("sleep")) or _number(
-        (payload.get("data_enrichment") or {}).get("sleep_score")
-    )
-    if score:
-        parts.append(f"sleep score {score:.0f}")
-    efficiency = _number(durations.get("sleep_efficiency"))
+        parts.append(f"{_hours(asleep * 60)} asleep")
+    efficiency = _number(payload.get("efficiency_percent"))
     if efficiency:
         parts.append(f"{_percent(efficiency):.0f}% efficiency")
-    heart = ((payload.get("heart_rate_data") or {}).get("summary")) or {}
-    resting = _number(heart.get("resting_hr_bpm")) or _number(heart.get("min_hr_bpm"))
-    if resting:
-        parts.append(f"lowest heart rate {resting:.0f} bpm")
+    hrv = _number(payload.get("avg_hrv_rmssd_ms")) or _number(payload.get("avg_hrv_sdnn_ms"))
+    if hrv:
+        parts.append(f"HRV {hrv:.0f} ms")
+    average = _number(payload.get("avg_heart_rate_bpm"))
+    if average:
+        parts.append(f"lowest heart rate {average:.0f} bpm")
     if not parts:
         return ""
     return f"Night of {_day(payload)}: " + ", ".join(parts) + "."
 
 
 def _activity(payload: dict) -> str:
-    metres = _number((payload.get("distance_data") or {}).get("distance_meters"))
-    seconds = _number((payload.get("active_durations_data") or {}).get("activity_seconds"))
-    heart = ((payload.get("heart_rate_data") or {}).get("summary")) or {}
-    name = str((payload.get("metadata") or {}).get("name") or "").strip()
-    kind = name or _activity_name(payload)
+    metres = _number(payload.get("distance_meters"))
+    seconds = _number(payload.get("duration_seconds"))
+    kind = (
+        str(payload.get("name") or payload.get("type") or "").strip().replace("_", " ").capitalize()
+    )
 
     parts = []
     if metres:
@@ -344,18 +356,12 @@ def _activity(payload: dict) -> str:
         parts.append(_hours(seconds))
     if metres and seconds:
         parts.append(f"{_pace(metres, seconds)} per km")
-    average = _number(heart.get("avg_hr_bpm"))
+    average = _number(payload.get("avg_heart_rate_bpm"))
     if average:
         parts.append(f"average heart rate {average:.0f} bpm")
     if not parts:
         return ""
-    return f"{kind} on {_day(payload)}: " + ", ".join(parts) + "."
-
-
-def _activity_name(payload: dict) -> str:
-    elevation = (payload.get("distance_data") or {}).get("elevation") or {}
-    gain = _number(elevation.get("gain_actual_meters"))
-    return "Run" if not gain or gain < 400 else "Hilly run"
+    return f"{kind or 'Session'} on {_day(payload)}: " + ", ".join(parts) + "."
 
 
 def _day(payload: dict) -> str:
