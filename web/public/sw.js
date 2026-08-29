@@ -25,7 +25,9 @@ self.addEventListener("fetch", (event) => {
         // Only successful responses: a 500 stored here would become the offline shell.
         if (response.ok) {
           const copy = response.clone();
-          caches.open(CACHE).then((cache) => cache.put(request, copy));
+          // Held open, or the worker can be killed the moment the page has its
+          // response and the shell keeps half its scripts.
+          event.waitUntil(caches.open(CACHE).then((cache) => cache.put(request, copy)));
         }
         return response;
       })
