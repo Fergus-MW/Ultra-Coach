@@ -62,6 +62,10 @@ export function CallOverlay() {
       const permission = await AudioModule.requestRecordingPermissionsAsync();
       if (!permission.granted) throw new Error('Microphone permission denied.');
 
+      // A minted token costs the runner a 20s server cooldown, so don't ask for one for
+      // a call that was cancelled while the permission dialog was up.
+      if (useCoach.getState().callSeq !== seq) return;
+
       const grant = await requestSession(who);
       if (useCoach.getState().callSeq !== seq) return;
 
