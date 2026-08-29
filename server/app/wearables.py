@@ -196,6 +196,7 @@ class Wearable:
         snapshot = self._snapshot(runner_id)
         snapshot.connected = False
         snapshot.readings.clear()
+        snapshot.measured.clear()
         await self._write(
             "UPDATE wearable_links SET confirmed = FALSE WHERE runner_id = $1", runner_id
         )
