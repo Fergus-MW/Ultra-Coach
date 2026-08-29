@@ -338,7 +338,7 @@ export default function CallScreen({ onProducts }: Props) {
                   disabled={busy !== ''}
                   onClick={() => void linkWatch()}
                 >
-                  Connect my Fitbit
+                  Connect my watch
                 </button>
               )}
             </div>

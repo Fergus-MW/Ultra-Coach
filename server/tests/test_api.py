@@ -894,11 +894,17 @@ def a_day(steps: int, hours_ago: float = 0) -> dict:
 
 
 def platform(
-    monkeypatch, wearable: Wearable, pages: dict[str, dict], connected: bool = True
+    monkeypatch,
+    wearable: Wearable,
+    pages: dict[str, dict],
+    connected: bool = True,
+    provider: str = "",
 ) -> list[tuple[str, str]]:
     """Stand in for our Open Wearables deployment, and record what was asked of it."""
     seen: list[tuple[str, str]] = []
-    active = {"data": [{"provider": "fitbit", "status": "active"}]} if connected else {"data": []}
+    configured = provider or main.get_settings().wearables_provider
+    connection = {"provider": configured, "status": "active"}
+    active = {"data": [connection]} if connected else {"data": []}
 
     async def call(method: str, path: str, **kwargs) -> dict:
         seen.append((method, path))
@@ -946,7 +952,7 @@ def test_a_resent_day_updates_rather_than_duplicates(wearable: Wearable) -> None
     assert "3,000 steps" not in block
 
 
-def test_connecting_creates_the_runner_once_and_asks_for_fitbit(
+def test_connecting_creates_the_runner_once_and_asks_for_consent(
     client: TestClient, wearable: Wearable, monkeypatch
 ) -> None:
     configured = main.get_settings()
@@ -958,7 +964,7 @@ def test_connecting_creates_the_runner_once_and_asks_for_fitbit(
         wearable,
         {
             "/api/v1/users": {"id": "0d2f-user"},
-            "/api/v1/oauth/fitbit/authorize": {"authorization_url": "https://fitbit.test/consent"},
+            "/api/v1/oauth/google/authorize": {"authorization_url": "https://google.test/consent"},
         },
     )
     identity = client.post("/api/register").json()
@@ -968,7 +974,7 @@ def test_connecting_creates_the_runner_once_and_asks_for_fitbit(
     first = client.post(f"/api/wearable/connect?user_id={runner}", headers=headers)
     second = client.post(f"/api/wearable/connect?user_id={runner}", headers=headers)
 
-    assert first.json() == {"url": "https://fitbit.test/consent"}
+    assert first.json() == {"url": "https://google.test/consent"}
     assert second.json() == first.json()
     # The runner is minted once: a second tap must reuse them, not fork their history.
     assert [path for method, path in seen if method == "POST"] == ["/api/v1/users"]
@@ -1024,6 +1030,26 @@ def test_cancelled_consent_is_not_a_connected_watch(
     client.post(f"/api/wearable/connect?user_id={runner}", headers=headers)
     # The runner closed Fitbit's consent screen: the platform account exists, the watch
     # does not, and the connect button has to stay.
+    status = client.get(f"/api/wearable?user_id={runner}", headers=headers).json()
+
+    assert status["connected"] is False
+
+
+def test_a_watch_on_last_seasons_provider_is_not_a_connection(
+    client: TestClient, wearable: Wearable, monkeypatch
+) -> None:
+    configured = main.get_settings()
+    monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")
+    monkeypatch.setattr(configured, "wearables_api_key", "sk-test")
+    monkeypatch.setattr(configured, "wearables_provider", "google")
+    identity = client.post("/api/register").json()
+    headers = {"authorization": f"Bearer {identity['token']}"}
+    runner = identity["user_id"]
+    ran(wearable.link("user-1", runner, "fitbit", confirmed=True))
+    # The Fitbit authorisation this runner gave months ago is still live on the platform,
+    # but it carries no sleep or heart rate: they have to be sent through Google anyway.
+    platform(monkeypatch, wearable, {}, provider="fitbit")
+
     status = client.get(f"/api/wearable?user_id={runner}", headers=headers).json()
 
     assert status["connected"] is False
