@@ -421,7 +421,13 @@ class Wearable:
                        ) AS rank
                        FROM wearable_readings WHERE measured_at >= $1
                    ) held WHERE rank <= $2""",
-                datetime.now(timezone.utc) - timedelta(days=REACH_BACK),
+                # From the start of that day, as a pull asks for it, so the oldest day is
+                # whole rather than cut at whatever hour the container came up.
+                datetime.combine(
+                    date.today() - timedelta(days=REACH_BACK),
+                    datetime.min.time(),
+                    tzinfo=timezone.utc,
+                ),
                 KEPT_PER_RUNNER,
             )
         self._links = {row["external_user_id"]: row["runner_id"] for row in links}
