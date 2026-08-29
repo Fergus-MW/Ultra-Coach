@@ -119,7 +119,20 @@ export async function fetchProducts(who: Identity, need = ''): Promise<Product[]
 
 export type Scenario = 'checkin' | 'races' | 'products' | 'excuse' | 'body';
 
-export type WearableStatus = { available: boolean; connected: boolean; summary: string };
+/** The numbers behind the summary, latest of each kind, absent fields simply missing. */
+export type WearablePanel = {
+  provider?: string;
+  daily?: { at: string; steps?: number; resting_bpm?: number; active_calories?: number; active_minutes?: number };
+  sleep?: { at: string; asleep_minutes?: number; efficiency_percent?: number; hrv_ms?: number; avg_bpm?: number };
+  activity?: { at: string; name?: string; km?: number; minutes?: number; pace_per_km?: string; avg_bpm?: number };
+};
+
+export type WearableStatus = {
+  available: boolean;
+  connected: boolean;
+  summary: string;
+  panel: WearablePanel;
+};
 
 /** Whether the coach can see this runner's watch, and what it currently reads. */
 export async function wearableStatus(who: Identity): Promise<WearableStatus> {
