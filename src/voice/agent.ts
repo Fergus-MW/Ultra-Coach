@@ -3,12 +3,13 @@ import { AudioModule } from 'expo-audio';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { runSession } from '../run/session';
 import { useSettings } from '../store/settings';
-import { getSignedAgentUrl } from './elevenlabs';
+import { getConversationToken } from './elevenlabs';
+import { runnerIsActive, shouldEndSession } from './idle';
 
 /** Biometrics go in as contextual updates, never by rewriting instructions. */
 const CONTEXT_INTERVAL_MS = 30_000;
-/** The conversation closes itself so a forgotten session cannot drain the battery. */
-const SILENCE_TIMEOUT_MS = 30_000;
+/** Fast enough to catch a pause between sentences as speech, not silence. */
+const ACTIVITY_POLL_MS = 1_000;
 
 export type TalkStatus = 'idle' | 'connecting' | 'connected' | 'error';
 
@@ -17,28 +18,11 @@ export function useCoachConversation() {
   const apiKey = useSettings((state) => state.apiKey);
   const [status, setStatus] = useState<TalkStatus>('idle');
   const [error, setError] = useState<string | null>(null);
-  const lastActivity = useRef<number>(0);
+  const lastSpoke = useRef<number>(0);
+  const startedAt = useRef<number>(0);
+  const vad = useRef<{ score: number; at: number }>({ score: 0, at: 0 });
   const contextTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const silenceTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const conversation = useConversation({
-    onConnect: () => {
-      setStatus('connected');
-      lastActivity.current = Date.now();
-    },
-    onDisconnect: () => {
-      setStatus('idle');
-      runSession.setVoiceSuppressed(false);
-    },
-    onMessage: () => {
-      lastActivity.current = Date.now();
-    },
-    onError: (message: string) => {
-      setError(message);
-      setStatus('error');
-      runSession.setVoiceSuppressed(false);
-    },
-  });
 
   const clearTimers = useCallback(() => {
     if (contextTimer.current) clearInterval(contextTimer.current);
@@ -46,6 +30,58 @@ export function useCoachConversation() {
     contextTimer.current = null;
     silenceTimer.current = null;
   }, []);
+
+  const conversationRef = useRef<ReturnType<typeof useConversation> | null>(null);
+  const stopRef = useRef<() => void>(() => {});
+
+  const conversation = useConversation({
+    onConnect: () => {
+      setStatus('connected');
+      lastSpoke.current = Date.now();
+      startedAt.current = Date.now();
+      // Whether the agent sends speech scores is a property of the session, so a
+      // score from the last one must not decide how this one detects the runner.
+      vad.current = { score: 0, at: 0 };
+      // startSession returns before the WebRTC connection exists, so the timers
+      // can only be armed here, once there is a session to talk to.
+      clearTimers();
+      contextTimer.current = setInterval(() => {
+        conversationRef.current?.sendContextualUpdate(runSession.contextSummary());
+      }, CONTEXT_INTERVAL_MS);
+      silenceTimer.current = setInterval(() => {
+        const activity = {
+          now: Date.now(),
+          startedAt: startedAt.current,
+          lastSpoke: lastSpoke.current,
+          agentSpeaking: conversationRef.current?.isSpeaking ?? false,
+          vadScore: vad.current.score,
+          vadAt: vad.current.at,
+          inputLevel: conversationRef.current?.getInputVolume() ?? 0,
+        };
+        if (runnerIsActive(activity)) lastSpoke.current = activity.now;
+        if (shouldEndSession(activity)) stopRef.current();
+      }, ACTIVITY_POLL_MS);
+    },
+    onDisconnect: () => {
+      clearTimers();
+      setStatus('idle');
+      runSession.setVoiceSuppressed(false);
+    },
+    onVadScore: ({ vadScore }: { vadScore: number }) => {
+      vad.current = { score: vadScore, at: Date.now() };
+    },
+    onMessage: ({ source }: { source: 'user' | 'ai' }) => {
+      // Only the runner speaking counts as activity: the agent asks "are you still
+      // there?" on its own, which would otherwise keep a dead session alive forever.
+      if (source === 'user') lastSpoke.current = Date.now();
+    },
+    onError: (message: string) => {
+      clearTimers();
+      setError(message);
+      setStatus('error');
+      runSession.setVoiceSuppressed(false);
+    },
+  });
 
   const stop = useCallback(() => {
     clearTimers();
@@ -70,30 +106,31 @@ export function useCoachConversation() {
       // must not talk over the conversation.
       runSession.setVoiceSuppressed(true);
 
+      // React Native only supports WebRTC: a private agent needs a conversation
+      // token, a public one connects on its id alone.
       const config = apiKey
-        ? { signedUrl: await getSignedAgentUrl(apiKey, settings.agentId) }
+        ? { conversationToken: await getConversationToken(apiKey, settings.agentId) }
         : { agentId: settings.agentId };
 
       conversation.startSession({
         ...config,
+        connectionType: 'webrtc' as const,
         dynamicVariables: {
           run_context: runSession.contextSummary(),
         },
       });
-
-      lastActivity.current = Date.now();
-      contextTimer.current = setInterval(() => {
-        conversation.sendContextualUpdate(runSession.contextSummary());
-      }, CONTEXT_INTERVAL_MS);
-      silenceTimer.current = setInterval(() => {
-        if (Date.now() - lastActivity.current > SILENCE_TIMEOUT_MS) stop();
-      }, 5000);
     } catch (caught) {
+      clearTimers();
       setError((caught as Error).message);
       setStatus('error');
       runSession.setVoiceSuppressed(false);
     }
-  }, [apiKey, conversation, settings.agentId, stop]);
+  }, [apiKey, clearTimers, conversation, settings.agentId]);
+
+  useEffect(() => {
+    conversationRef.current = conversation;
+    stopRef.current = stop;
+  });
 
   useEffect(() => clearTimers, [clearTimers]);
 

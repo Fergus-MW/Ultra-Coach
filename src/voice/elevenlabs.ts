@@ -113,13 +113,16 @@ export async function listVoices(apiKey: string): Promise<ElevenLabsVoice[]> {
   return body.voices ?? [];
 }
 
-/** Private agents need a short-lived signed URL rather than a bare agent id. */
-export async function getSignedAgentUrl(apiKey: string, agentId: string): Promise<string> {
+/**
+ * Private agents need a short-lived token. React Native only speaks WebRTC, so
+ * this is the token endpoint rather than the WebSocket signed URL.
+ */
+export async function getConversationToken(apiKey: string, agentId: string): Promise<string> {
   const response = await fetch(
-    `${ELEVENLABS_API}/convai/conversation/get-signed-url?agent_id=${encodeURIComponent(agentId)}`,
+    `${ELEVENLABS_API}/convai/conversation/token?agent_id=${encodeURIComponent(agentId)}`,
     { headers: { 'xi-api-key': apiKey } },
   );
   if (!response.ok) throw new Error(`ElevenLabs ${response.status}: ${await response.text()}`);
-  const body = (await response.json()) as { signed_url: string };
-  return body.signed_url;
+  const body = (await response.json()) as { token: string };
+  return body.token;
 }
