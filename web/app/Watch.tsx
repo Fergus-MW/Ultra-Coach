@@ -41,6 +41,8 @@ function toTiles(panel: WearablePanel): Tile[] {
       tiles.push({ label: 'Resting HR', value: `${round(daily.resting_bpm)} bpm`, note: when });
     if (daily.active_minutes)
       tiles.push({ label: 'Active', value: `${round(daily.active_minutes)} min`, note: when });
+    if (daily.active_calories)
+      tiles.push({ label: 'Burned', value: `${round(daily.active_calories)} kcal`, note: when });
   }
 
   if (sleep) {
@@ -54,11 +56,14 @@ function toTiles(panel: WearablePanel): Tile[] {
         note: when,
       });
     if (sleep.hrv_ms) tiles.push({ label: 'HRV', value: `${round(sleep.hrv_ms)} ms`, note: when });
+    if (sleep.avg_bpm)
+      tiles.push({ label: 'Sleeping HR', value: `${round(sleep.avg_bpm)} bpm`, note: when });
   }
 
   if (activity) {
     const when = `${activity.name ?? 'Session'} · ${day(activity.at)}`;
     if (activity.km) tiles.push({ label: 'Last run', value: `${activity.km.toFixed(1)} km`, note: when });
+    if (activity.minutes) tiles.push({ label: 'Time', value: hours(activity.minutes), note: when });
     if (activity.pace_per_km)
       tiles.push({ label: 'Pace', value: `${activity.pace_per_km} /km`, note: when });
     if (activity.avg_bpm)
@@ -72,13 +77,17 @@ function toTiles(panel: WearablePanel): Tile[] {
 function day(at: string): string {
   const moment = new Date(at);
   if (Number.isNaN(moment.getTime())) return '';
-  const midnight = new Date();
-  midnight.setHours(0, 0, 0, 0);
-  const days = Math.floor((midnight.getTime() - moment.getTime()) / 86_400_000) + 1;
+  // Whole calendar days apart, not elapsed hours: a run at 23:00 was still yesterday,
+  // and a clock change must not push a reading a day out.
+  const days = Math.round((startOfDay(new Date()) - startOfDay(moment)) / 86_400_000);
   if (days <= 0) return 'today';
   if (days === 1) return 'yesterday';
   if (days < 7) return `${days} days ago`;
   return moment.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+}
+
+function startOfDay(moment: Date): number {
+  return new Date(moment.getFullYear(), moment.getMonth(), moment.getDate()).getTime();
 }
 
 function hours(minutes: number): string {

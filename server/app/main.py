@@ -422,6 +422,7 @@ async def wearable_disconnect(user_id: str, authorization: str = Header(default=
         "available": wearable.configured,
         "connected": wearable.connected(user_id),
         "summary": wearable.block(user_id),
+        "panel": wearable.panel(user_id),
     }
 
 

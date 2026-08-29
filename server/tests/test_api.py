@@ -1109,8 +1109,10 @@ def test_disconnecting_revokes_the_consent_and_forgets_the_numbers(
 
     assert ("DELETE", "/api/v1/users/user-1/connections/google") in seen
     assert status["connected"] is False
-    # The coach must not still be quoting a watch the runner has just taken away.
+    # The coach must not still be quoting a watch the runner has just taken away, and the
+    # screen must not still be showing its numbers.
     assert status["summary"] == ""
+    assert status["panel"] == {"provider": "Fitbit"}
 
 
 def test_a_week_of_running_is_not_collapsed_into_one_run(wearable: Wearable, monkeypatch) -> None:
