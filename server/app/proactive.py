@@ -20,6 +20,9 @@ from .ws import Ringer
 log = logging.getLogger(__name__)
 
 MIN_HOURS_BETWEEN_CALLS = 20
+# Long enough for the browser to finish opening, short enough to feel like the coach
+# noticed them arrive.
+GREETING_DELAY_SECONDS = 4
 
 
 @dataclass
@@ -78,6 +81,7 @@ class Coach:
         self._scheduler = AsyncIOScheduler(timezone="UTC")
         self._admission = asyncio.Lock()
         self._ringing: set[str] = set()
+        self._greetings: set[asyncio.Task] = set()
 
     def start(self) -> None:
         settings = get_settings()
@@ -114,6 +118,28 @@ class Coach:
             ]
         )
 
+    def on_connect(self, user_id: str) -> None:
+        """A runner who opens the app and is owed a check-in gets rung there and then.
+
+        Waiting for the next quarter-hour sweep would leave them staring at a screen
+        with nothing to press — the app is supposed to start the conversation.
+        """
+        if not get_settings().scheduler_enabled:
+            return
+        if not self._checkin_missed(user_id) and self._calls.last_call(user_id) is not None:
+            return
+
+        async def ring_shortly() -> None:
+            await asyncio.sleep(GREETING_DELAY_SECONDS)
+            try:
+                await self.call(user_id)
+            except Exception:
+                log.exception("greeting call failed for %s", user_id)
+
+        task = asyncio.ensure_future(ring_shortly())
+        self._greetings.add(task)
+        task.add_done_callback(self._greetings.discard)
+
     async def _call_each(self, runners: list[str]) -> list[CallOutcome]:
         """One runner's failure must not cost everyone behind them their check-in."""
         outcomes = []
@@ -144,9 +170,14 @@ class Coach:
             delivered = await self._ringer.ring(user_id, line, reason)
             if delivered:
                 self._calls.record(user_id, datetime.now(timezone.utc))
-                await self._memory.record_event(
-                    user_id, "proactive_call_placed", {"reason": reason, "opening_line": line}
-                )
+                # The runner's phone is already ringing. A history write that fails
+                # afterwards is a gap in the graph, not a call that did not happen.
+                try:
+                    await self._memory.record_event(
+                        user_id, "proactive_call_placed", {"reason": reason, "opening_line": line}
+                    )
+                except Exception:
+                    log.exception("rang %s but could not record the call", user_id)
             return CallOutcome(user_id, bool(delivered), reason, line, delivered)
         finally:
             self._ringing.discard(user_id)

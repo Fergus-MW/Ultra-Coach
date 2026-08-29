@@ -173,9 +173,12 @@ def _caller(request: Request) -> str:
     on the socket address puts every runner in the world in one bucket: useless as a
     limit and a way to lock everyone else out.
     """
+    # The last entry is the one Render's proxy appended, so it is the address the proxy
+    # actually saw. Anything further left was written by the caller and is theirs to
+    # forge, which would hand them a fresh allowance per request.
     forwarded = request.headers.get("x-forwarded-for", "")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        return forwarded.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 
@@ -358,6 +361,7 @@ async def runner_socket(websocket: WebSocket, user_id: str, token: str = "") -> 
 
     await ringer.connect(user_id, websocket)
     await memory.ensure_user(user_id)
+    coach.on_connect(user_id)
     try:
         while True:
             message = await websocket.receive_json()

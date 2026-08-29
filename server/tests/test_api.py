@@ -630,13 +630,19 @@ def test_the_sitemap_gives_a_title_and_an_image() -> None:
 
 
 def test_registration_is_limited_per_device_not_per_proxy(client: TestClient) -> None:
+    """Different devices behind the proxy each get their own allowance."""
     for index in range(12):
         response = client.post("/api/register", headers={"x-forwarded-for": f"10.0.0.{index}"})
         assert response.status_code == 200
 
+
+def test_a_forged_forwarded_for_buys_no_extra_registrations(client: TestClient) -> None:
+    """Only the address the proxy appended counts, so a caller cannot invent a new one."""
     codes = [
-        client.post("/api/register", headers={"x-forwarded-for": "10.0.0.99, 10.1.1.1"}).status_code
-        for _ in range(12)
+        client.post(
+            "/api/register", headers={"x-forwarded-for": f"1.2.3.{index}, 10.0.0.99"}
+        ).status_code
+        for index in range(12)
     ]
     assert codes.count(200) == 10
     assert codes[-1] == 429
