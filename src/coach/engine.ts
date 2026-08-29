@@ -99,6 +99,12 @@ interface EngineState {
   lastSegmentLabel: string | null;
 }
 
+/** A cue that has met its condition, plus the state change to apply if it wins. */
+interface Candidate {
+  cue: Cue;
+  commit: () => void;
+}
+
 const HR_LOST_AFTER_MS = 30_000;
 const DRIFT_MIN_INTERVAL_MS = 15 * 60_000;
 const DRIFT_PACE_TOLERANCE = 0.06;
@@ -154,6 +160,22 @@ export class CoachEngine {
     return this.next(id, staticCueText(id, rotation), false);
   }
 
+  private candidate(cue: Cue, commit: () => void = () => undefined): Candidate {
+    return { cue, commit };
+  }
+
+  /** Phrase rotation only advances if the line is actually spoken. */
+  private staticCandidate(id: CueId, commit: () => void = () => undefined): Candidate {
+    const rotation = this.state.rotation[id] ?? 0;
+    return {
+      cue: this.next(id, staticCueText(id, rotation), false),
+      commit: () => {
+        this.state.rotation[id] = rotation + 1;
+        commit();
+      },
+    };
+  }
+
   /** Called once when a run begins. */
   start(): Cue {
     return this.staticCue('run_start');
@@ -175,13 +197,16 @@ export class CoachEngine {
   update(input: CoachInput): Cue | null {
     const candidates = this.evaluate(input);
     if (candidates.length === 0) return null;
-    candidates.sort((a, b) => b.priority - a.priority);
+    candidates.sort((a, b) => b.cue.priority - a.cue.priority);
     const chosen = candidates[0];
     const sinceLast = input.now - this.state.lastCueAt;
-    if (sinceLast < this.config.minGapMs && chosen.priority < PRIORITY.zone_high) return null;
+    if (sinceLast < this.config.minGapMs && chosen.cue.priority < PRIORITY.zone_high) return null;
+    // Schedules only advance for the line that is actually spoken, so a cue
+    // dropped by the gap rule comes back on the next tick.
+    chosen.commit();
     this.state.lastCueAt = input.now;
-    this.state.lastFiredAt[chosen.id] = input.now;
-    return chosen;
+    this.state.lastFiredAt[chosen.cue.id] = input.now;
+    return chosen.cue;
   }
 
   private firedRecently(id: CueId, now: number, cooldownMs: number): boolean {
@@ -189,25 +214,30 @@ export class CoachEngine {
     return last !== undefined && now - last < cooldownMs;
   }
 
-  private evaluate(input: CoachInput): Cue[] {
+  private evaluate(input: CoachInput): Candidate[] {
     const { now, metrics, target, zones } = input;
     const state = this.state;
     const config = this.config;
-    const cues: Cue[] = [];
+    const cues: Candidate[] = [];
 
     if (input.segmentLabel && input.segmentLabel !== state.lastSegmentLabel) {
-      const first = state.lastSegmentLabel === null;
-      state.lastSegmentLabel = input.segmentLabel;
-      if (!first) cues.push(this.next('segment_change', `Next: ${input.segmentLabel}.`, true));
+      const label = input.segmentLabel;
+      if (state.lastSegmentLabel === null) {
+        state.lastSegmentLabel = label;
+      } else {
+        cues.push(
+          this.candidate(this.next('segment_change', `Next: ${label}.`, true), () => {
+            state.lastSegmentLabel = label;
+          }),
+        );
+      }
     }
 
     const hrStale = metrics.heartRateAgeMs === null || metrics.heartRateAgeMs > HR_LOST_AFTER_MS;
     if (hrStale && !state.hrLost && metrics.elapsedMs > HR_LOST_AFTER_MS) {
-      state.hrLost = true;
-      cues.push(this.staticCue('hr_lost'));
+      cues.push(this.staticCandidate('hr_lost', () => (state.hrLost = true)));
     } else if (!hrStale && state.hrLost) {
-      state.hrLost = false;
-      cues.push(this.staticCue('hr_restored'));
+      cues.push(this.staticCandidate('hr_restored', () => (state.hrLost = false)));
     }
 
     if (metrics.heartRateBpm !== null && target.type !== 'rest') {
@@ -220,8 +250,7 @@ export class CoachEngine {
           now - state.zoneHighSince >= config.zoneHighSustainMs &&
           !this.firedRecently('zone_high', now, 90_000)
         ) {
-          state.outOfZone = true;
-          cues.push(this.staticCue('zone_high'));
+          cues.push(this.staticCandidate('zone_high', () => (state.outOfZone = true)));
         }
       } else if (bpm < low) {
         state.zoneHighSince = null;
@@ -232,15 +261,13 @@ export class CoachEngine {
           now - state.zoneLowSince >= config.zoneLowSustainMs &&
           !this.firedRecently('zone_low', now, 5 * 60_000)
         ) {
-          state.outOfZone = true;
-          cues.push(this.staticCue('zone_low'));
+          cues.push(this.staticCandidate('zone_low', () => (state.outOfZone = true)));
         }
       } else {
         state.zoneHighSince = null;
         state.zoneLowSince = null;
         if (state.outOfZone) {
-          state.outOfZone = false;
-          cues.push(this.staticCue('zone_back'));
+          cues.push(this.staticCandidate('zone_back', () => (state.outOfZone = false)));
         }
       }
     }
@@ -252,7 +279,7 @@ export class CoachEngine {
         now - state.hillSince >= config.gradientSustainMs &&
         !this.firedRecently('hill_hike', now, 4 * 60_000)
       ) {
-        cues.push(this.staticCue('hill_hike'));
+        cues.push(this.staticCandidate('hill_hike'));
       }
     } else if (metrics.gradientPct <= config.descentGradientPct) {
       state.hillSince = null;
@@ -261,7 +288,7 @@ export class CoachEngine {
         now - state.descentSince >= config.gradientSustainMs &&
         !this.firedRecently('descent', now, 6 * 60_000)
       ) {
-        cues.push(this.staticCue('descent'));
+        cues.push(this.staticCandidate('descent'));
       }
     } else {
       state.hillSince = null;
@@ -270,32 +297,33 @@ export class CoachEngine {
 
     if (config.fuellingEnabled) {
       if (state.lastFuelAt !== null && now - state.lastFuelAt >= config.fuelIntervalMs) {
-        state.lastFuelAt = now;
-        cues.push(this.staticCue('fuel'));
+        cues.push(this.staticCandidate('fuel', () => (state.lastFuelAt = now)));
       }
       if (state.lastDrinkAt !== null && now - state.lastDrinkAt >= config.drinkIntervalMs) {
-        state.lastDrinkAt = now;
-        cues.push(this.staticCue('drink'));
+        cues.push(this.staticCandidate('drink', () => (state.lastDrinkAt = now)));
       }
     }
 
     if (config.splitsEnabled && metrics.distanceM - state.lastSplitM >= config.splitEveryM) {
-      state.lastSplitM += config.splitEveryM;
+      const splitM = state.lastSplitM + config.splitEveryM;
       const pace = metrics.averagePaceSecPerKm;
-      const text = `${distanceLabel(state.lastSplitM, config.useMiles)}, ${durationLabel(
-        metrics.elapsedMs,
-      )}${pace ? `, averaging ${paceLabel(pace, config.useMiles)}` : ''}.`;
-      cues.push(this.next('split', text, true));
+      const text = `${distanceLabel(splitM, config.useMiles)}, ${durationLabel(metrics.elapsedMs)}${
+        pace ? `, averaging ${paceLabel(pace, config.useMiles)}` : ''
+      }.`;
+      cues.push(this.candidate(this.next('split', text, true), () => (state.lastSplitM = splitM)));
     }
 
     const targetMs = target.durationMin * 60_000;
     if (!state.halfwayDone && targetMs > 0 && metrics.elapsedMs >= targetMs / 2) {
-      state.halfwayDone = true;
-      cues.push(this.next('halfway', `Halfway. ${durationLabel(targetMs / 2)} to go.`, true));
+      cues.push(
+        this.candidate(
+          this.next('halfway', `Halfway. ${durationLabel(targetMs / 2)} to go.`, true),
+          () => (state.halfwayDone = true),
+        ),
+      );
     }
     if (!state.targetDone && targetMs > 0 && metrics.elapsedMs >= targetMs) {
-      state.targetDone = true;
-      cues.push(this.staticCue('target_reached'));
+      cues.push(this.staticCandidate('target_reached', () => (state.targetDone = true)));
     }
 
     const drift = this.checkDrift(input);
@@ -308,7 +336,7 @@ export class CoachEngine {
    * Cardiac drift: heart rate climbing while pace holds is the earliest signal
    * that fuelling or heat is starting to cost you the back half of the run.
    */
-  private checkDrift(input: CoachInput): Cue | null {
+  private checkDrift(input: CoachInput): Candidate | null {
     const { now, metrics } = input;
     const state = this.state;
     if (metrics.heartRateAvgBpm === null || metrics.paceSecPerKm === null) return null;
@@ -332,6 +360,6 @@ export class CoachEngine {
     state.driftBaseline = sample;
     if (risePct < this.config.driftThresholdPct) return null;
     if (this.firedRecently('cardiac_drift', now, 20 * 60_000)) return null;
-    return this.staticCue('cardiac_drift');
+    return this.staticCandidate('cardiac_drift');
   }
 }

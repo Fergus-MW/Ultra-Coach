@@ -46,4 +46,26 @@ describe('run session pausing', () => {
     expect(run?.metrics.elapsedMs).toBeGreaterThanOrEqual(55_000);
     expect(run?.metrics.elapsedMs).toBeLessThan(75_000);
   });
+
+  it('does not let a long pause fire the coaching timers on resume', async () => {
+    jest.useFakeTimers();
+    const spoken: string[] = [];
+    const settings = { ...DEFAULT_SETTINGS, useSimulators: true };
+    await runSession.start(null, settings, '');
+
+    jest.advanceTimersByTime(60_000);
+    runSession.pause();
+    // Longer than the fuel and drink reminder intervals.
+    jest.advanceTimersByTime(45 * 60_000);
+    runSession.resume();
+    jest.advanceTimersByTime(30_000);
+    spoken.push(...useRunStore.getState().cues.map((entry) => entry.cueId));
+
+    await runSession.stop();
+    runSession.reset();
+    jest.useRealTimers();
+
+    expect(spoken).not.toContain('fuel');
+    expect(spoken).not.toContain('drink');
+  });
 });

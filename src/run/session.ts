@@ -208,7 +208,9 @@ class RunSessionController {
     const target: SessionTarget = segment ? { ...base, zone: segment.targetZone } : base;
 
     const input: CoachInput = {
-      now,
+      // The engine runs on an active-run clock, so a long pause does not make
+      // every reminder and sustain window fire the moment you set off again.
+      now: now - this.pausedMs,
       metrics: adjusted,
       target,
       zones: this.settings.zones,

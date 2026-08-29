@@ -51,6 +51,17 @@ describe('CoachEngine', () => {
     expect(later).toContain('zone_high');
   });
 
+  it('keeps a reminder pending when a warning outranks it', () => {
+    // The fuel reminder comes due in the same second as a zone warning, which
+    // outranks it. The fuel line must come back on a later tick rather than
+    // being consumed and pushed out to the next full interval.
+    const engine = new CoachEngine(START, { ...DEFAULT_COACH_CONFIG, fuelIntervalMs: 21_000 });
+    const contested = run(engine, 1, 21, { heartRateBpm: 175, zone: 5 });
+    expect(contested).toEqual(['zone_high']);
+    const after = run(engine, 22, 41, { heartRateBpm: 140, zone: 2 });
+    expect(after).toContain('fuel');
+  });
+
   it('confirms the return to zone once', () => {
     const engine = new CoachEngine(START);
     run(engine, 1, 40, { heartRateBpm: 175, zone: 5 });

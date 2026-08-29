@@ -33,6 +33,16 @@ describe('generatePlan', () => {
     expect(training[training.length - 1].volumeMin).toBeLessThan(peak * 0.75);
   });
 
+  it('reduces volume every week of the taper', () => {
+    const taper = plan.weeks.filter((week) => week.phase === 'taper').map((week) => week.volumeMin);
+    expect(taper.length).toBeGreaterThan(1);
+    for (let index = 1; index < taper.length; index += 1) {
+      expect(taper[index]).toBeLessThan(taper[index - 1]);
+    }
+    const preTaper = plan.weeks.filter((week) => week.phase === 'base' || week.phase === 'build' || week.phase === 'peak');
+    expect(taper[0]).toBeLessThan(Math.max(...preTaper.map((week) => week.volumeMin)));
+  });
+
   it('inserts recovery weeks', () => {
     expect(plan.weeks.some((week) => week.isDownWeek)).toBe(true);
   });

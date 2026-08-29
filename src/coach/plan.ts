@@ -162,8 +162,11 @@ export function generatePlan(config: PlanConfig): TrainingPlan {
 
     if (weekIndex > 0) {
       if (phase === 'taper' || phase === 'race') {
-        const taperIndex = Math.max(0, totalWeeks - 1 - weekIndex);
-        const factor = TAPER_FACTORS[Math.min(taperIndex, TAPER_FACTORS.length - 1)];
+        // TAPER_FACTORS runs earliest taper week first, so count forward from
+        // the start of the taper rather than back from race week.
+        const weeksToRace = totalWeeks - weekIndex;
+        const taperIndex = Math.min(TAPER_FACTORS.length - 1, Math.max(0, TAPER_FACTORS.length + 1 - weeksToRace));
+        const factor = TAPER_FACTORS[taperIndex];
         volume = Math.round(config.currentWeeklyMin * Math.max(1, WEEKLY_GROWTH) * factor * 1.6);
         longRun = Math.round(longRun * 0.7);
       } else if (!isDownWeek) {
