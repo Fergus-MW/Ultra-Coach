@@ -29,6 +29,16 @@ self.addEventListener("fetch", (event) => {
         }
         return response;
       })
-      .catch(() => caches.match(request).then((hit) => hit ?? caches.match("/")))
+      .catch(async () => {
+        const hit = await caches.match(request);
+        if (hit) return hit;
+        // Only a page navigation can use the shell; answering a script or style request
+        // with HTML would break the page more confusingly than an outright failure.
+        if (request.mode === "navigate") {
+          const shell = await caches.match("/");
+          if (shell) return shell;
+        }
+        return Response.error();
+      })
   );
 });

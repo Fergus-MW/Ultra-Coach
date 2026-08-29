@@ -21,9 +21,16 @@ export default function CallScreen() {
   const socket = useRef<WebSocket | null>(null);
   const ringtone = useRef<Ringtone | null>(null);
   const who = useRef<Identity | null>(null);
+  const cancelled = useRef(false);
 
   const conversation = useConversation({
     onConnect: () => {
+      if (cancelled.current) {
+        // Another tab took this call while this one was still connecting.
+        void conversation.endSession();
+        setScreen("standby");
+        return;
+      }
       setScreen("live");
       // Only a connected session counts as answered: a denied microphone or a failed
       // token must not go into the runner's history as a call they took.
@@ -35,6 +42,12 @@ export default function CallScreen() {
       setScreen("ended");
     },
   });
+
+  // The socket handlers outlive a render, so they reach the session through a ref.
+  const conversationRef = useRef(conversation);
+  useEffect(() => {
+    conversationRef.current = conversation;
+  }, [conversation]);
 
   const silence = useCallback(() => {
     ringtone.current?.stop();
@@ -68,13 +81,18 @@ export default function CallScreen() {
       next.onmessage = (event) => {
         const payload = JSON.parse(event.data);
         if (payload.type === "call_cancelled") {
-          // Another tab took or refused the call; this one must not keep ringing.
+          // Another tab took or refused the call; this one must neither keep ringing
+          // nor carry on opening a second voice session for the same call.
+          cancelled.current = true;
           silence();
           setIncoming(null);
-          setScreen((current) => (current === "ringing" ? "standby" : current));
+          void conversationRef.current?.endSession();
+          setScreen((current) => (current === "live" ? "ended" : "standby"));
           return;
         }
         if (payload.type !== "incoming_call") return;
+
+        cancelled.current = false;
 
         setIncoming({ opening_line: payload.opening_line, reason: payload.reason });
         setScreen("ringing");
@@ -119,7 +137,13 @@ export default function CallScreen() {
         // The agent's prompt template reads {{runner_state}}; overriding the prompt
         // itself is refused by the agent config, and would let the browser rewrite
         // the coach's persona.
-        dynamicVariables: { runner_id: me.userId, runner_state: grant.runner_state },
+        // The webhook only writes this call into a runner's history when the id it
+        // carries is signed, so the signature travels with the session.
+        dynamicVariables: {
+          runner_id: me.userId,
+          runner_sig: grant.runner_sig,
+          runner_state: grant.runner_state,
+        },
         overrides: { agent: { firstMessage: incoming?.opening_line } },
       });
     } catch (cause) {

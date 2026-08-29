@@ -43,7 +43,7 @@ class Memory:
     def __init__(self, client: AsyncZep | None = None) -> None:
         settings = get_settings()
         self._client = client or AsyncZep(api_key=settings.zep_api_key)
-        self._ingesting: dict[str, asyncio.Lock] = {}
+        self._ingesting: dict[str, tuple[asyncio.Lock, int]] = {}
 
     async def ensure_user(self, user_id: str) -> None:
         try:
@@ -65,13 +65,19 @@ class Memory:
         thread_id = f"call-{conversation_id}"
         # Retries of one delivery can arrive while the first is still adding messages,
         # and both would then see an empty thread and write the call in twice.
-        lock = self._ingesting.setdefault(conversation_id, asyncio.Lock())
+        lock, waiting = self._ingesting.get(conversation_id, (asyncio.Lock(), 0))
+        self._ingesting[conversation_id] = (lock, waiting + 1)
         try:
             async with lock:
                 await self._ingest(thread_id, conversation_id, user_id, turns)
         finally:
-            if not lock.locked():
-                self._ingesting.pop(conversation_id, None)
+            # Dropping the lock while another delivery still holds or awaits it would
+            # hand the retry a fresh lock and let both write the same call.
+            held, count = self._ingesting[conversation_id]
+            if count == 1:
+                del self._ingesting[conversation_id]
+            else:
+                self._ingesting[conversation_id] = (held, count - 1)
 
     async def _ingest(
         self,

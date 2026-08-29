@@ -79,6 +79,7 @@ export type SessionGrant = {
   conversation_token: string;
   agent_id: string;
   runner_state: string;
+  runner_sig: string;
 };
 
 export async function requestSession(who: Identity): Promise<SessionGrant> {

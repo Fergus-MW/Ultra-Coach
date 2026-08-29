@@ -57,6 +57,11 @@ class FakeRinger:
 
 
 @pytest.fixture(autouse=True)
+def fresh_limits() -> None:
+    main._register_bucket = main.Bucket(burst=10, per_second=0.2)
+
+
+@pytest.fixture(autouse=True)
 def settings(monkeypatch, tmp_path):
     configured = main.get_settings()
     monkeypatch.setattr(configured, "tool_secret", TOOL_SECRET)
@@ -103,7 +108,10 @@ def test_transcript_webhook_ingests_signed_turns(
             "data": {
                 "conversation_id": "conv_1",
                 "conversation_initiation_client_data": {
-                    "dynamic_variables": {"runner_id": "fergus"}
+                    "dynamic_variables": {
+                        "runner_id": "fergus",
+                        "runner_sig": sign("fergus"),
+                    }
                 },
                 "transcript": [
                     {"role": "agent", "message": "Where was Sunday's long run?"},
@@ -160,6 +168,12 @@ def test_transcript_webhook_reports_an_ingestion_failure(client: TestClient, mon
         {
             "data": {
                 "conversation_id": "conv_2",
+                "conversation_initiation_client_data": {
+                    "dynamic_variables": {
+                        "runner_id": "fergus",
+                        "runner_sig": sign("fergus"),
+                    }
+                },
                 "transcript": [{"role": "user", "message": "I skipped it."}],
             }
         }
@@ -455,3 +469,40 @@ def test_concurrent_deliveries_write_one_transcript() -> None:
 
     asyncio.run(both())
     assert len(zep.batches) == 1
+
+
+def test_transcript_for_an_unsigned_runner_is_discarded(
+    client: TestClient, fake_memory: FakeMemory
+) -> None:
+    body, headers = signed(
+        {
+            "data": {
+                "conversation_id": "conv_3",
+                "conversation_initiation_client_data": {
+                    "dynamic_variables": {"runner_id": "victim", "runner_sig": "guessed"}
+                },
+                "transcript": [{"role": "user", "message": "planted history"}],
+            }
+        }
+    )
+    response = client.post("/webhooks/elevenlabs-transcript", content=body, headers=headers)
+
+    assert response.json() == {"status": "unsigned", "turns": 0}
+    assert fake_memory.transcripts == []
+
+
+def test_registration_is_rate_limited_per_caller(client: TestClient) -> None:
+    codes = [client.post("/api/register").status_code for _ in range(12)]
+    assert codes.count(200) == 10
+    assert codes[-1] == 429
+
+
+def test_a_late_failure_keeps_a_newer_cooldown() -> None:
+    throttle = main.Throttle(every=20.0)
+    admitted, first = throttle.allow("fergus")
+    assert admitted
+
+    throttle._last["fergus"] = 1_000.0  # a newer attempt reserved the cooldown
+    throttle.refund("fergus", first)
+
+    assert throttle._last["fergus"] == 1_000.0
