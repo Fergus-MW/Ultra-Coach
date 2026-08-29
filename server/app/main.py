@@ -124,29 +124,36 @@ class Bucket:
         return self._take_locally(key)
 
     async def _take_shared(self, key: str) -> bool | None:
-        # One statement, so two workers cannot both read the same allowance and both
-        # spend it. A refused caller is parked one token below empty rather than
-        # further, so a flood costs them a moment's extra wait and no more.
-        refill = (
-            "LEAST($2::double precision,"
-            " register_hits.tokens + EXTRACT(EPOCH FROM (now() - register_hits.seen)) * $3)"
-        )
+        # One statement, and the refill is read under a row lock, so two workers cannot
+        # both see the same allowance and both spend it. A refused caller is not charged:
+        # otherwise steady retries would cancel the refill and starve them for good.
+        statement = """
+            WITH prior AS (
+                SELECT LEAST(
+                    $2::double precision,
+                    tokens + EXTRACT(EPOCH FROM (now() - seen)) * $3
+                ) AS tokens
+                FROM register_hits WHERE caller = $1 FOR UPDATE
+            ), spend AS (
+                INSERT INTO register_hits (caller, tokens, seen)
+                VALUES ($1, $2::double precision - 1, now())
+                ON CONFLICT (caller) DO UPDATE
+                SET tokens = GREATEST(
+                        (SELECT tokens FROM prior)
+                        - CASE WHEN (SELECT tokens FROM prior) >= 1 THEN 1 ELSE 0 END,
+                        0
+                    ),
+                    seen = now()
+                RETURNING 1
+            )
+            SELECT COALESCE((SELECT tokens FROM prior), $2::double precision) >= 1
+        """
         try:
             async with database.pool.acquire() as connection:
-                left = await connection.fetchval(
-                    f"""INSERT INTO register_hits (caller, tokens, seen)
-                        VALUES ($1, $2::double precision - 1, now())
-                        ON CONFLICT (caller) DO UPDATE
-                        SET tokens = GREATEST({refill} - 1, -1), seen = now()
-                        RETURNING tokens""",
-                    key,
-                    float(self._burst),
-                    self._rate,
-                )
+                return await connection.fetchval(statement, key, float(self._burst), self._rate)
         except Exception:  # a limiter that cannot read must not close registration
             log.exception("could not read the registration allowance")
             return None
-        return left is not None and left >= 0
 
     def _take_locally(self, key: str) -> bool:
         now = monotonic()

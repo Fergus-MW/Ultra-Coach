@@ -1122,6 +1122,24 @@ def test_a_registration_allowance_is_shared_by_every_worker(monkeypatch) -> None
     assert on_postgres(scenario) == [True, True, True, False, False]
 
 
+def test_hammering_the_door_does_not_stop_the_allowance_refilling(monkeypatch) -> None:
+    async def scenario(store: Database) -> list[bool]:
+        monkeypatch.setattr(main, "database", store)
+        bucket = main.Bucket(burst=2, per_second=1.0)
+        spent = [await bucket.take("1.2.3.4") for _ in range(3)]
+        for _ in range(2):
+            # Half a second passes, and the caller retries the moment it does.
+            async with store.pool.acquire() as connection:
+                await connection.execute(
+                    "UPDATE register_hits SET seen = seen - interval '0.5 seconds'"
+                )
+            spent.append(await bucket.take("1.2.3.4"))
+        return spent
+
+    # Two allowed, then refused, and refused retries still let the bucket refill.
+    assert on_postgres(scenario) == [True, True, False, False, True]
+
+
 def test_two_tabs_cannot_fork_the_runners_watch() -> None:
     async def scenario(database: Database) -> tuple[str, str]:
         minted = iter(["user-a", "user-b"])
