@@ -627,3 +627,67 @@ def test_the_sitemap_gives_a_title_and_an_image() -> None:
         "B12 - Orange",
         "https://cdn.shopify.com/b12.png",
     )
+
+
+def test_registration_is_limited_per_device_not_per_proxy(client: TestClient) -> None:
+    for index in range(12):
+        response = client.post("/api/register", headers={"x-forwarded-for": f"10.0.0.{index}"})
+        assert response.status_code == 200
+
+    codes = [
+        client.post("/api/register", headers={"x-forwarded-for": "10.0.0.99, 10.1.1.1"}).status_code
+        for _ in range(12)
+    ]
+    assert codes.count(200) == 10
+    assert codes[-1] == 429
+
+
+def test_registration_does_not_create_a_user_until_the_device_connects(
+    client: TestClient, fake_memory: FakeMemory
+) -> None:
+    calls: list[str] = []
+    fake_memory.ensure_user = lambda user_id: calls.append(user_id) or _noop()  # type: ignore[assignment]
+
+    identity = client.post("/api/register").json()
+    assert calls == []
+
+    with client.websocket_connect(f"/ws/{identity['user_id']}?token={identity['token']}"):
+        pass
+    assert calls == [identity["user_id"]]
+
+
+async def _noop() -> None:
+    return None
+
+
+def test_the_other_tabs_stop_ringing_even_if_the_write_fails(
+    client: TestClient, fake_memory: FakeMemory
+) -> None:
+    async def broken(user_id: str, kind: str, payload: dict) -> None:
+        raise RuntimeError("zep is down")
+
+    fake_memory.record_event = broken  # type: ignore[assignment]
+    identity = client.post("/api/register").json()
+    url = f"/ws/{identity['user_id']}?token={identity['token']}"
+
+    with client.websocket_connect(url) as answering, client.websocket_connect(url) as other:
+        answering.send_json({"type": "call_answered"})
+        assert other.receive_json() == {"type": "call_cancelled"}
+
+
+def test_a_tavily_timeout_is_a_race_search_error(monkeypatch) -> None:
+    import asyncio
+
+    import httpx
+
+    from app import races
+
+    monkeypatch.setattr(races.get_settings(), "tavily_api_key", "key")
+
+    async def timeout(*args, **kwargs):
+        raise httpx.ConnectTimeout("too slow")
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", timeout)
+
+    with pytest.raises(RaceSearchError):
+        asyncio.run(races.search_races("London"))

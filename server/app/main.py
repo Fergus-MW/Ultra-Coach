@@ -166,15 +166,30 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+def _caller(request: Request) -> str:
+    """The device's address, not the proxy's.
+
+    Behind Render every request arrives from the same load balancer, so keying a limit
+    on the socket address puts every runner in the world in one bucket: useless as a
+    limit and a way to lock everyone else out.
+    """
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
 @app.post("/api/register", response_model=IdentityResponse)
 async def register(request: Request) -> IdentityResponse:
-    """A device claims an identity once. No login, because there is nothing to type."""
-    caller = request.client.host if request.client else "unknown"
-    if not _register_bucket.take(caller):
+    """A device claims an identity once. No login, because there is nothing to type.
+
+    Nothing is stored here: the id is an HMAC, and the Zep user is created when the
+    device first connects, so an abandoned or automated registration costs nothing.
+    """
+    if not _register_bucket.take(_caller(request)):
         raise HTTPException(status_code=429, detail="too many registrations")
 
     user_id, token = issue_identity()
-    await memory.ensure_user(user_id)
     return IdentityResponse(user_id=user_id, token=token)
 
 
@@ -346,12 +361,17 @@ async def runner_socket(websocket: WebSocket, user_id: str, token: str = "") -> 
     try:
         while True:
             message = await websocket.receive_json()
-            if message.get("type") == "call_answered":
-                await memory.record_event(user_id, "call_answered", {})
-                await ringer.cancel(user_id, except_socket=websocket)
-            elif message.get("type") == "call_declined":
-                await memory.record_event(user_id, "call_declined", {})
-                await ringer.cancel(user_id, except_socket=websocket)
+            kind = message.get("type")
+            if kind not in ("call_answered", "call_declined"):
+                continue
+            # Stop the other tabs first, and never let a memory write take the socket
+            # down: a lost event is a gap in the history, a dropped socket is a runner
+            # the coach can no longer reach.
+            await ringer.cancel(user_id, except_socket=websocket)
+            try:
+                await memory.record_event(user_id, kind, {})
+            except Exception:
+                log.exception("could not record %s for %s", kind, user_id)
     except WebSocketDisconnect:
         pass
     finally:

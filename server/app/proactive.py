@@ -46,6 +46,10 @@ class CallLog:
         self._times[user_id] = moment
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._path.touch(mode=0o600, exist_ok=True)
+            # Who was coached and when is the runner's business, not every account's
+            # on the host, so the file stays owner-only whatever the umask says.
+            self._path.chmod(0o600)
             self._path.write_text(
                 json.dumps({key: value.isoformat() for key, value in self._times.items()})
             )

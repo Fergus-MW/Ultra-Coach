@@ -43,22 +43,30 @@ async def search_races(
         "distance, elevation gain and cutoff times"
     )
 
-    async with httpx.AsyncClient(timeout=25) as client:
-        response = await client.post(
-            TAVILY_API,
-            headers={"Authorization": f"Bearer {settings.tavily_api_key}"},
-            json={
-                "query": query,
-                "search_depth": "advanced",
-                "max_results": limit,
-                "include_answer": False,
-            },
-        )
+    # Everything Tavily can do to us becomes RaceSearchError, so the tool route answers
+    # the agent with a 502 it can talk about instead of an unhandled 500.
+    try:
+        async with httpx.AsyncClient(timeout=25) as client:
+            response = await client.post(
+                TAVILY_API,
+                headers={"Authorization": f"Bearer {settings.tavily_api_key}"},
+                json={
+                    "query": query,
+                    "search_depth": "advanced",
+                    "max_results": limit,
+                    "include_answer": False,
+                },
+            )
+    except httpx.HTTPError as error:
+        raise RaceSearchError(f"Tavily unreachable: {error}") from error
 
     if response.status_code >= 400:
         raise RaceSearchError(f"Tavily {response.status_code}: {response.text[:200]}")
 
-    results = response.json().get("results", [])
+    try:
+        results = response.json().get("results", [])
+    except ValueError as error:
+        raise RaceSearchError(f"Tavily returned {response.text[:120]!r}") from error
     return [
         Race(
             name=item.get("title", "").strip(),

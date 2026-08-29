@@ -3,6 +3,8 @@ const TOKEN_KEY = "ultracoach.runner_token";
 
 export type Identity = { userId: string; token: string };
 
+let inFlight: Promise<Identity> | null = null;
+
 /**
  * A device-scoped identity, so the runner never has to type who they are. The id is
  * minted by the backend together with a token; every later request proves the device
@@ -12,12 +14,22 @@ export async function identity(): Promise<Identity> {
   const stored = readIdentity();
   if (stored) return stored;
 
-  // Two tabs opening a fresh device would otherwise each register, splitting the
-  // runner's history between two ids, so registration happens one tab at a time.
-  if (navigator.locks) {
-    return navigator.locks.request("ultracoach.identity", () => register());
-  }
-  return register();
+  // Several callers on one page — the call screen and the products tab both mount at
+  // once — must share a single registration, or the device ends up with two ids and a
+  // split history. Web Locks extends that across tabs, where the browser has them.
+  const pending =
+    inFlight ??
+    locked().finally(() => {
+      inFlight = null;
+    });
+  inFlight = pending;
+  return pending;
+}
+
+/** One registration at a time across tabs, where the browser supports it. */
+async function locked(): Promise<Identity> {
+  if (!navigator.locks) return register();
+  return navigator.locks.request("ultracoach.identity", register);
 }
 
 async function register(): Promise<Identity> {
