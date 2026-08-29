@@ -2,7 +2,7 @@
 
 A voice coach for ultramarathon training that listens to your heart rate strap and talks to you while you run.
 
-Android first, Expo SDK 57. Built to the architecture described at https://ultra-coach.60x.ai/: instant on-device
+Android first, Expo SDK 57. Instant on-device
 cues plus an optional short push-to-talk conversation, rather than an always-listening realtime agent that would
 flatten your battery and your music on a six hour day.
 
