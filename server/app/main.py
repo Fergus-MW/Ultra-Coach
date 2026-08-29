@@ -402,7 +402,10 @@ async def demo_products(
     """The same screen push the coach makes, without waiting for it to decide to."""
     require_runner(user_id, authorization)
     try:
-        products = await catalogue.search(need[:200] or "electrolytes for cramp on long runs")
+        products = await catalogue.search(need[:200]) if need else []
+        # A demo that lands on an empty tab looks broken, so a need nothing matches
+        # still shows the range the coach would pick from.
+        products = products or await catalogue.featured()
     except HealfError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
 
