@@ -108,11 +108,20 @@ async function request<T>(
   return (await response.json()) as T;
 }
 
+/** The phone's own zone: the coach orders a session for "5 a.m." and has to mean theirs. */
+function deviceZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  } catch {
+    return '';
+  }
+}
+
 /** The token and agent for one call, plus the signed identity the webhook demands. */
 export function requestSession(who: Identity): Promise<SessionGrant> {
   return request<SessionGrant>('POST', '/api/session', {
     token: who.token,
-    body: { user_id: who.userId },
+    body: { user_id: who.userId, timezone: deviceZone() },
   });
 }
 

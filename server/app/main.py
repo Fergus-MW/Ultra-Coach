@@ -21,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .auth import bearer, issue_identity, sign, verify, verify_webhook
+from .clock import clocks
 from .config import Settings, get_settings
 from .db import database
 from .healf import HealfError, catalogue
@@ -47,6 +48,7 @@ async def lifespan(app: FastAPI):
     if await database.connect():
         await coach.restore()
         await wearable.load()
+        await clocks.load()
     coach.start()
     yield
     coach.shutdown()
@@ -187,6 +189,8 @@ class IdentityResponse(BaseModel):
 
 class SessionRequest(BaseModel):
     user_id: str
+    # The device's IANA zone, so the coach can say "tomorrow at five" and mean it.
+    timezone: str = ""
 
 
 class SessionResponse(BaseModel):
@@ -275,6 +279,7 @@ async def create_session(
     if not settings.elevenlabs_agent_id:
         raise HTTPException(status_code=503, detail="no agent configured")
 
+    await clocks.remember(body.user_id, body.timezone)
     admitted, stamp = _session_throttle.allow(body.user_id)
     if not admitted:
         raise HTTPException(status_code=429, detail="too many sessions")

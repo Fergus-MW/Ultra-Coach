@@ -45,6 +45,13 @@ CREATE TABLE IF NOT EXISTS register_hits (
     seen   TIMESTAMPTZ NOT NULL
 );
 
+-- The device's own IANA zone, so a call scheduled for "tomorrow morning" lands on the
+-- runner's morning and not the server's.
+CREATE TABLE IF NOT EXISTS runner_zones (
+    runner_id TEXT PRIMARY KEY,
+    zone      TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS wearable_readings (
     runner_id   TEXT NOT NULL,
     kind        TEXT NOT NULL,
