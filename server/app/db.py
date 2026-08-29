@@ -37,6 +37,14 @@ ALTER TABLE wearable_links ADD COLUMN IF NOT EXISTS confirmed BOOLEAN NOT NULL D
 DROP INDEX IF EXISTS wearable_links_runner;
 CREATE UNIQUE INDEX IF NOT EXISTS wearable_links_one_per_runner ON wearable_links (runner_id);
 
+-- Registration burns a paid Zep user, and the limit has to hold across every worker
+-- and every restart, so the allowance lives here rather than in one process's memory.
+CREATE TABLE IF NOT EXISTS register_hits (
+    caller TEXT PRIMARY KEY,
+    tokens DOUBLE PRECISION NOT NULL,
+    seen   TIMESTAMPTZ NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS wearable_readings (
     runner_id   TEXT NOT NULL,
     kind        TEXT NOT NULL,

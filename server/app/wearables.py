@@ -172,12 +172,13 @@ class Wearable:
         return next((user for user, runner in self._links.items() if runner == runner_id), "")
 
     def connected(self, runner_id: str) -> bool:
-        """Only an authorised device counts: a runner who cancelled consent has none."""
+        """Only a live authorisation counts. Cancelled consent, or consent revoked from
+        the watch's own settings, is not a connection however much history we hold."""
         snapshot = self._snapshots.get(runner_id)
-        return bool(snapshot and (snapshot.connected or snapshot.readings))
+        return bool(snapshot and snapshot.connected)
 
     async def check_connection(self, runner_id: str) -> bool:
-        """Ask the platform whether consent actually went through."""
+        """Ask the platform whether consent is actually in force, either way."""
         user_id = self.user_for(runner_id)
         if not user_id:
             return False
@@ -188,9 +189,20 @@ class Wearable:
             if isinstance(connection, dict) and connection.get("status") == "active"
         ]
         if not active:
+            await self._revoke(runner_id)
             return False
         await self.link(user_id, runner_id, str(active[0].get("provider") or ""), confirmed=True)
         return True
+
+    async def _revoke(self, runner_id: str) -> None:
+        """Consent is gone: the readings stay for context, the connection does not."""
+        snapshot = self._snapshots.get(runner_id)
+        if snapshot is None or not snapshot.connected:
+            return
+        snapshot.connected = False
+        await self._write(
+            "UPDATE wearable_links SET confirmed = FALSE WHERE runner_id = $1", runner_id
+        )
 
     async def record(self, runner_id: str, kind: str, payload: dict) -> str:
         """Reduce one record to a line. Returns it, or "" if there was nothing."""
@@ -410,7 +422,7 @@ def _sleep(payload: dict) -> str:
         parts.append(f"HRV {hrv:.0f} ms")
     average = _number(payload.get("avg_heart_rate_bpm"))
     if average:
-        parts.append(f"lowest heart rate {average:.0f} bpm")
+        parts.append(f"average heart rate {average:.0f} bpm")
     if not parts:
         return ""
     return f"Night of {_day(payload)}: " + ", ".join(parts) + "."

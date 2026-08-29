@@ -111,7 +111,44 @@ class Bucket:
         self._rate = per_second
         self._state: dict[str, tuple[float, float]] = {}
 
-    def take(self, key: str) -> bool:
+    async def take(self, key: str) -> bool:
+        """Spend one token, from Postgres where there is one.
+
+        Held in this process alone, the allowance would reset on every restart and be
+        multiplied by every worker: an attacker just spreads the requests around.
+        """
+        if database.ready:
+            spent = await self._take_shared(key)
+            if spent is not None:
+                return spent
+        return self._take_locally(key)
+
+    async def _take_shared(self, key: str) -> bool | None:
+        # One statement, so two workers cannot both read the same allowance and both
+        # spend it. A refused caller is parked one token below empty rather than
+        # further, so a flood costs them a moment's extra wait and no more.
+        refill = (
+            "LEAST($2::double precision,"
+            " register_hits.tokens + EXTRACT(EPOCH FROM (now() - register_hits.seen)) * $3)"
+        )
+        try:
+            async with database.pool.acquire() as connection:
+                left = await connection.fetchval(
+                    f"""INSERT INTO register_hits (caller, tokens, seen)
+                        VALUES ($1, $2::double precision - 1, now())
+                        ON CONFLICT (caller) DO UPDATE
+                        SET tokens = GREATEST({refill} - 1, -1), seen = now()
+                        RETURNING tokens""",
+                    key,
+                    float(self._burst),
+                    self._rate,
+                )
+        except Exception:  # a limiter that cannot read must not close registration
+            log.exception("could not read the registration allowance")
+            return None
+        return left is not None and left >= 0
+
+    def _take_locally(self, key: str) -> bool:
         now = monotonic()
         tokens, seen = self._state.get(key, (float(self._burst), now))
         tokens = min(self._burst, tokens + (now - seen) * self._rate)
@@ -213,7 +250,7 @@ async def register(request: Request) -> IdentityResponse:
     Nothing is stored here: the id is an HMAC, and the Zep user is created when the
     device first connects, so an abandoned or automated registration costs nothing.
     """
-    if not _register_bucket.take(_caller(request)):
+    if not await _register_bucket.take(_caller(request)):
         raise HTTPException(status_code=429, detail="too many registrations")
 
     user_id, token = issue_identity()

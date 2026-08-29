@@ -92,7 +92,9 @@ def on_postgres(scenario):
         if not await database.connect(TEST_DSN):
             return None
         async with database.pool.acquire() as connection:
-            await connection.execute("TRUNCATE calls, wearable_links, wearable_readings")
+            await connection.execute(
+                "TRUNCATE calls, wearable_links, wearable_readings, register_hits"
+            )
         try:
             return await scenario(database)
         finally:
@@ -1052,6 +1054,21 @@ def test_a_week_of_running_is_not_collapsed_into_one_run(wearable: Wearable, mon
     assert "10.0 km" in block and "32.0 km" in block
 
 
+def test_revoking_consent_takes_the_watch_away_again(wearable: Wearable, monkeypatch) -> None:
+    configured = main.get_settings()
+    monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")
+    monkeypatch.setattr(configured, "wearables_api_key", "sk-test")
+    ran(wearable.link("user-1", "fergus", "fitbit", confirmed=True))
+    ran(wearable.record("fergus", "sleep", a_night(7.0)))
+    platform(monkeypatch, wearable, {}, connected=False)
+
+    ran(wearable.refresh("fergus"))
+
+    # Revoked from the watch's own settings: the history stays, the connection does not.
+    assert wearable.connected("fergus") is False
+    assert "7h 00m asleep" in wearable.block("fergus")
+
+
 def test_wearable_data_stays_dead_without_a_platform(client: TestClient) -> None:
     identity = client.post("/api/register").json()
     headers = {"authorization": f"Bearer {identity['token']}"}
@@ -1093,6 +1110,16 @@ def test_wearable_data_survives_a_redeploy() -> None:
         return restarted.block("fergus")
 
     assert "7h 15m asleep" in on_postgres(scenario)
+
+
+def test_a_registration_allowance_is_shared_by_every_worker(monkeypatch) -> None:
+    async def scenario(store: Database) -> list[bool]:
+        monkeypatch.setattr(main, "database", store)
+        # Two workers, each with its own bucket, sharing one allowance of three.
+        one, two = main.Bucket(burst=3, per_second=0.0), main.Bucket(burst=3, per_second=0.0)
+        return [await (one if turn % 2 else two).take("1.2.3.4") for turn in range(5)]
+
+    assert on_postgres(scenario) == [True, True, True, False, False]
 
 
 def test_two_tabs_cannot_fork_the_runners_watch() -> None:

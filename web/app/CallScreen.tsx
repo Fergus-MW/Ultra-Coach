@@ -118,6 +118,9 @@ export default function CallScreen({ onProducts }: Props) {
 
         setIncoming({ opening_line: payload.opening_line, reason: payload.reason });
         setScreen('ringing');
+        // A second call arriving while the first still rings must not leave that
+        // ringtone playing with nothing left holding a reference to stop it.
+        silence();
         ringtone.current = new Ringtone();
         ringtone.current.start();
       };
