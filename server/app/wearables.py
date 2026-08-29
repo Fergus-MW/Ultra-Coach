@@ -341,8 +341,13 @@ class Wearable:
 
     async def _call(self, method: str, path: str, absent_ok: bool = False, **kwargs: Any) -> dict:
         base = get_settings().wearables_url.rstrip("/")
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.request(method, f"{base}{path}", headers=_headers(), **kwargs)
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.request(
+                    method, f"{base}{path}", headers=_headers(), **kwargs
+                )
+        except httpx.HTTPError as error:
+            raise WearableError(f"the wearables platform is unreachable: {error}") from error
         if response.status_code == 404 and absent_ok:
             return {}
         if response.status_code >= 400:

@@ -1100,6 +1100,27 @@ def test_consent_already_withdrawn_at_the_provider_still_disconnects(
     assert wearable.connected("fergus") is False
 
 
+def test_an_unreachable_platform_is_a_refused_disconnect_not_a_crash(
+    client: TestClient, wearable: Wearable, monkeypatch
+) -> None:
+    configured = main.get_settings()
+    monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")
+    monkeypatch.setattr(configured, "wearables_api_key", "sk-test")
+    identity = client.post("/api/register").json()
+    headers = {"authorization": f"Bearer {identity['token']}"}
+    runner = identity["user_id"]
+    ran(wearable.link("user-1", runner, "google", confirmed=True))
+
+    async def unreachable(self, method: str, url: str, **kwargs) -> None:
+        raise httpx.ConnectError("no route to host")
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", unreachable)
+    answer = client.post(f"/api/wearable/disconnect?user_id={runner}", headers=headers)
+
+    assert answer.status_code == 503
+    assert wearable.connected(runner) is True
+
+
 def test_a_platform_that_cannot_revoke_does_not_claim_the_watch_is_gone(
     client: TestClient, wearable: Wearable, monkeypatch
 ) -> None:
