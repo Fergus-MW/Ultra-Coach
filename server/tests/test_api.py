@@ -5,7 +5,7 @@ import hmac
 import json
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 from time import monotonic
 from zoneinfo import ZoneInfo
@@ -950,6 +950,54 @@ def platform(
     return seen
 
 
+def test_a_watch_that_last_synced_a_month_ago_is_still_read(
+    wearable: Wearable, monkeypatch
+) -> None:
+    configured = main.get_settings()
+    monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")
+    monkeypatch.setattr(configured, "wearables_api_key", "sk-test")
+    monkeypatch.setattr(configured, "wearables_provider", "google")
+    ran(wearable.link("user-1", "fergus", "google", confirmed=True))
+    old = a_run(days_ago=30)
+    windows: list[str] = []
+
+    async def call(method: str, path: str, **kwargs) -> dict:
+        if path.endswith("/connections"):
+            return {"data": [{"provider": "google", "status": "active"}]}
+        if not path.endswith("/events/workouts"):
+            return {"data": []}
+        start = str((kwargs.get("params") or {}).get("start_date") or "")
+        windows.append(start)
+        reaches = date.fromisoformat(start) <= date.today() - timedelta(days=29)
+        return {"data": [old] if reaches else []}
+
+    monkeypatch.setattr(wearable, "_call", call)
+
+    assert ran(wearable.refresh("fergus"))
+    assert "21.1 km" in wearable.block("fergus")
+    # The week is asked for first: reaching back is what happens when it holds nothing.
+    assert len(windows) == 2
+
+
+def test_a_long_history_is_cut_to_the_records_worth_quoting(
+    wearable: Wearable, monkeypatch
+) -> None:
+    configured = main.get_settings()
+    monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")
+    monkeypatch.setattr(configured, "wearables_api_key", "sk-test")
+    monkeypatch.setattr(configured, "wearables_provider", "google")
+    ran(wearable.link("user-1", "fergus", "google", confirmed=True))
+    runs = [a_run(days_ago=days, km=days + 1) for days in range(40)]
+    platform(monkeypatch, wearable, {"/api/v1/users/user-1/events/workouts": {"data": runs}})
+
+    found = ran(wearable.refresh("fergus"))
+
+    assert len(found) == 8
+    # The newest first, not whichever order the platform happened to answer in.
+    assert "1.0 km" in found[0][1]
+    assert "9.0 km" not in " ".join(fact for _, fact in found)
+
+
 def test_wearable_records_reach_the_runners_prompt(wearable: Wearable) -> None:
     ran(wearable.link("user-1", "fergus", "fitbit"))
     ran(wearable.record("fergus", "sleep", a_night(5.5)))
@@ -968,12 +1016,26 @@ def test_wearable_records_reach_the_runners_prompt(wearable: Wearable) -> None:
     )
 
 
-def test_a_stale_night_is_not_read_out_as_news(wearable: Wearable) -> None:
+def test_a_stale_night_gives_way_to_the_week_the_runner_just_had(wearable: Wearable) -> None:
+    old = a_night()
+    old["end_time"] = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    ran(wearable.record("fergus", "sleep", old))
+    ran(wearable.record("fergus", "daily", a_day(14000)))
+
+    block = wearable.block("fergus")
+
+    assert "14,000 steps" in block
+    assert "asleep" not in block
+
+
+def test_a_stale_night_is_read_out_when_it_is_all_there_is(wearable: Wearable) -> None:
+    # Silence would read as a watch that never synced. The line carries its own date, so
+    # the coach quotes a month-old night as a month-old night.
     old = a_night()
     old["end_time"] = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     ran(wearable.record("fergus", "sleep", old))
 
-    assert wearable.block("fergus") == ""
+    assert "asleep" in wearable.block("fergus")
 
 
 def test_a_resent_day_updates_rather_than_duplicates(wearable: Wearable) -> None:
@@ -1014,12 +1076,15 @@ def test_a_record_the_coach_already_holds_still_reaches_the_screen(
     assert wearable.panel("fergus")["activity"]["km"] == 21.1
 
 
-def test_a_stale_night_is_not_shown_on_screen_either(wearable: Wearable) -> None:
+def test_a_stale_night_still_reaches_the_screen_with_its_date(wearable: Wearable) -> None:
     old = a_night()
     old["end_time"] = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     ran(wearable.record("fergus", "sleep", old))
 
-    assert "sleep" not in wearable.panel("fergus")
+    shown = wearable.panel("fergus")["sleep"]
+
+    assert shown["asleep_minutes"] == 360
+    assert shown["at"] == old["end_time"]
 
 
 def test_connecting_creates_the_runner_once_and_asks_for_consent(

@@ -25,6 +25,14 @@ log = logging.getLogger(__name__)
 # the coach should be shouting about.
 FRESH_FOR = timedelta(days=8)
 
+# How far back to look when the week holds nothing. A watch that last synced a month
+# ago still says more about the runner than an empty screen does.
+REACH_BACK = 90
+
+# Records kept from one pull of one kind. Ninety days of walks is not context, and each
+# one costs a row and a line in the graph.
+KEEP_EACH = 8
+
 
 class WearableError(RuntimeError):
     pass
@@ -57,10 +65,11 @@ class Snapshot:
     measured: dict[str, Measured] = field(default_factory=dict)
 
     def as_panel(self) -> dict[str, Any]:
-        cutoff = datetime.now(timezone.utc) - FRESH_FOR
+        # Every tile carries its own date, so a month-old run reads as a month-old run
+        # rather than being hidden behind a screen that claims nothing has synced.
         panel: dict[str, Any] = {"provider": self.provider}
         for kind, measured in self.measured.items():
-            if measured.at >= cutoff and measured.values:
+            if measured.values:
                 panel[kind] = {"at": measured.at.isoformat(), **measured.values}
         return panel
 
@@ -344,6 +353,15 @@ class Wearable:
         if await self._sync(user_id, historical=wanted) and wanted:
             self._backfilled.add(runner_id)
 
+        found = await self._pull(runner_id, user_id, days)
+        # A watch whose last record is a month old answers the week with nothing at all,
+        # which is indistinguishable from a sync that never happened. Reach back before
+        # concluding there is nothing there.
+        if not found and not self._snapshot(runner_id).readings:
+            found = await self._pull(runner_id, user_id, REACH_BACK)
+        return found
+
+    async def _pull(self, runner_id: str, user_id: str, days: int) -> list[tuple[str, str]]:
         window = {
             "start_date": (date.today() - timedelta(days=days)).isoformat(),
             "end_date": date.today().isoformat(),
@@ -359,10 +377,10 @@ class Wearable:
             except Exception as error:  # one dead endpoint must not lose the others
                 log.warning("%s refresh failed for %s: %s", kind, runner_id, error)
                 continue
-            for record in payload.get("data") or []:
-                if isinstance(record, dict) and (
-                    fact := await self.record(runner_id, kind, record)
-                ):
+            records = [record for record in payload.get("data") or [] if isinstance(record, dict)]
+            records.sort(key=_payload_time, reverse=True)
+            for record in records[:KEEP_EACH]:
+                if fact := await self.record(runner_id, kind, record):
                     found.append((kind, fact))
         return found
 
@@ -453,13 +471,12 @@ def _key(kind: str, moment: datetime) -> str:
 
 def _fresh(readings: dict[str, Reading]) -> list[Reading]:
     cutoff = datetime.now(timezone.utc) - FRESH_FOR
-    recent = sorted(
-        (reading for reading in readings.values() if reading.at >= cutoff),
-        key=lambda reading: reading.at,
-        reverse=True,
-    )
-    # A fortnight of lines read into every call would bury the numbers that matter.
-    return recent[:12]
+    ordered = sorted(readings.values(), key=lambda reading: reading.at, reverse=True)
+    recent = [reading for reading in ordered if reading.at >= cutoff]
+    # A fortnight of lines read into every call would bury the numbers that matter. With
+    # nothing inside the week, the last few are read anyway: each line says which day it
+    # was, so the coach quotes a stale run as stale rather than pretending there is none.
+    return recent[:12] if recent else ordered[:4]
 
 
 def _provider(payload: dict) -> str:
