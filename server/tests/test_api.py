@@ -123,7 +123,7 @@ def test_transcript_webhook_ingests_signed_turns(
             }
         }
     )
-    response = client.post("/webhooks/elevenlabs-transcript", content=body, headers=headers)
+    response = client.post("/webhooks/elevenlabs", content=body, headers=headers)
 
     assert response.json() == {"status": "ingested", "turns": 2}
     user_id, conversation_id, turns = fake_memory.transcripts[0]
@@ -135,7 +135,7 @@ def test_transcript_webhook_rejects_a_forged_payload(
     client: TestClient, fake_memory: FakeMemory
 ) -> None:
     response = client.post(
-        "/webhooks/elevenlabs-transcript",
+        "/webhooks/elevenlabs",
         json={"data": {"conversation_id": "conv_1", "transcript": []}},
         headers={"elevenlabs-signature": "t=1700000000,v0=deadbeef"},
     )
@@ -155,7 +155,7 @@ def test_transcript_webhook_rejects_a_replayed_delivery(
         },
         age_seconds=3 * 60 * 60,
     )
-    response = client.post("/webhooks/elevenlabs-transcript", content=body, headers=headers)
+    response = client.post("/webhooks/elevenlabs", content=body, headers=headers)
 
     assert response.status_code == 401
     assert fake_memory.transcripts == []
@@ -180,7 +180,7 @@ def test_transcript_webhook_reports_an_ingestion_failure(client: TestClient, mon
             }
         }
     )
-    response = client.post("/webhooks/elevenlabs-transcript", content=body, headers=headers)
+    response = client.post("/webhooks/elevenlabs", content=body, headers=headers)
     assert response.status_code == 500
 
 
@@ -487,7 +487,7 @@ def test_transcript_for_an_unsigned_runner_is_discarded(
             }
         }
     )
-    response = client.post("/webhooks/elevenlabs-transcript", content=body, headers=headers)
+    response = client.post("/webhooks/elevenlabs", content=body, headers=headers)
 
     assert response.json() == {"status": "unsigned", "turns": 0}
     assert fake_memory.transcripts == []

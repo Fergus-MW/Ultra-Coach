@@ -23,7 +23,12 @@ def main() -> int:
     load_dotenv()
     api_key = os.environ["ELEVENLABS_API_KEY"]
     base_url = os.environ["PUBLIC_BASE_URL"].rstrip("/")
+    # An empty secret syncs an agent whose every call to us is a 401, and the only
+    # symptom is a conversation that dies mid-sentence. Refuse rather than ship that.
     tool_secret = os.environ.get("TOOL_SECRET", "")
+    if not tool_secret:
+        print("TOOL_SECRET is empty: the agent could not call the backend", file=sys.stderr)
+        return 1
     agent_id = os.environ.get("ELEVENLABS_AGENT_ID", "")
 
     config = agent_config(base_url, tool_secret)

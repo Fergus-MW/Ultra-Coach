@@ -25,7 +25,7 @@ The Android app in the repo root is a separate product and is untouched by this 
 | `POST /api/register` | PWA, once per device | none |
 | `POST /api/session` | PWA, before answering a call | device token |
 | `POST /api/proactive-ring/{user_id}` | Manual trigger of a call | `x-tool-secret` |
-| `POST /webhooks/elevenlabs-transcript` | ElevenLabs post-call webhook | `ElevenLabs-Signature` |
+| `POST /webhooks/elevenlabs` | ElevenLabs post-call webhook | `ElevenLabs-Signature` |
 | `POST /tools/search-races` | ElevenLabs server tool `search_ultra_events` | `x-tool-secret` |
 | `POST /llm/chat/completions` | ElevenLabs custom LLM | `x-tool-secret` |
 | `WS /ws/{user_id}?token=` | PWA ring channel and call outcomes | device token |

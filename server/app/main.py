@@ -239,7 +239,7 @@ async def proactive_ring(user_id: str, body: CallRequest | None = None) -> dict:
     }
 
 
-@app.post("/webhooks/elevenlabs-transcript")
+@app.post("/webhooks/elevenlabs")
 async def elevenlabs_transcript(
     request: Request,
     elevenlabs_signature: str = Header(default=""),
