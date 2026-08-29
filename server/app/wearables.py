@@ -40,10 +40,29 @@ class Reading:
 
 
 @dataclass
+class Measured:
+    """The same record as numbers, for the screen rather than the prompt."""
+
+    at: datetime
+    values: dict[str, Any]
+
+
+@dataclass
 class Snapshot:
     provider: str = ""
     connected: bool = False
     readings: dict[str, Reading] = field(default_factory=dict)
+    # Latest of each kind only: the panel shows today, last night and the last session,
+    # not a week of history the runner has to scroll.
+    measured: dict[str, Measured] = field(default_factory=dict)
+
+    def as_panel(self) -> dict[str, Any]:
+        cutoff = datetime.now(timezone.utc) - FRESH_FOR
+        panel: dict[str, Any] = {"provider": self.provider}
+        for kind, measured in self.measured.items():
+            if measured.at >= cutoff and measured.values:
+                panel[kind] = {"at": measured.at.isoformat(), **measured.values}
+        return panel
 
     def as_block(self) -> str:
         fresh = _fresh(self.readings)
@@ -243,6 +262,12 @@ class Wearable:
 
         snapshot = self._snapshot(runner_id)
         moment = _payload_time(payload)
+        provider = _provider(payload) or snapshot.provider
+        snapshot.provider = provider
+        # Numbers are kept whether or not the line is news: a redeploy loses them (only
+        # the spoken summaries are persisted) and they are refilled by the next pull,
+        # which finds every record unchanged.
+        self._measure(snapshot, kind, moment, payload)
         # Each day, night and workout is its own reading: keyed by kind alone, a week's
         # training would collapse into whichever run was pulled last.
         key = _key(kind, moment)
@@ -252,8 +277,6 @@ class Wearable:
         # a record it already holds is not news to repeat into the graph.
         if existing and (existing.at > moment or existing.text == text):
             return ""
-        provider = _provider(payload) or snapshot.provider
-        snapshot.provider = provider
         snapshot.readings[key] = Reading(at=moment, provider=provider, text=text)
         await self._write(
             """INSERT INTO wearable_readings (runner_id, kind, measured_at, provider, summary)
@@ -271,9 +294,23 @@ class Wearable:
         )
         return text
 
+    def _measure(self, snapshot: Snapshot, kind: str, moment: datetime, payload: dict) -> None:
+        values = _measure(kind, payload)
+        if not values:
+            return
+        held = snapshot.measured.get(kind)
+        if held and held.at > moment:
+            return
+        snapshot.measured[kind] = Measured(at=moment, values=values)
+
     def block(self, runner_id: str) -> str:
         snapshot = self._snapshots.get(runner_id)
         return snapshot.as_block() if snapshot else ""
+
+    def panel(self, runner_id: str) -> dict[str, Any]:
+        """The same readings as numbers, for the runner's own screen."""
+        snapshot = self._snapshots.get(runner_id)
+        return snapshot.as_panel() if snapshot else {}
 
     def spoken(self, runner_id: str) -> str:
         block = self.block(runner_id)
@@ -420,6 +457,42 @@ def _summarise(kind: str, payload: dict) -> str:
     if kind == "activity":
         return _activity(payload)
     return ""
+
+
+def _measure(kind: str, payload: dict) -> dict[str, Any]:
+    """The numbers behind one record, absent keys left out rather than sent as zero."""
+    if kind == "daily":
+        heart = payload.get("heart_rate") or {}
+        found = {
+            "steps": _number(payload.get("steps")),
+            "resting_bpm": _number(heart.get("resting_bpm")),
+            "active_calories": _number(payload.get("active_calories_kcal")),
+            "active_minutes": _number(payload.get("active_minutes")),
+        }
+    elif kind == "sleep":
+        hrv = _number(payload.get("avg_hrv_rmssd_ms")) or _number(payload.get("avg_hrv_sdnn_ms"))
+        found = {
+            "asleep_minutes": _number(payload.get("duration_minutes")),
+            "efficiency_percent": _percent(_number(payload.get("efficiency_percent"))),
+            "hrv_ms": hrv,
+            "avg_bpm": _number(payload.get("avg_heart_rate_bpm")),
+        }
+    elif kind == "activity":
+        metres = _number(payload.get("distance_meters"))
+        seconds = _number(payload.get("duration_seconds"))
+        found = {
+            "km": round(metres / 1000, 2) if metres else 0.0,
+            "minutes": round(seconds / 60) if seconds else 0.0,
+            "avg_bpm": _number(payload.get("avg_heart_rate_bpm")),
+        }
+        if metres and seconds:
+            found["pace_per_km"] = _pace(metres, seconds)
+        name = str(payload.get("name") or payload.get("type") or "").strip().replace("_", " ")
+        if name:
+            found["name"] = name.capitalize()
+    else:
+        return {}
+    return {key: value for key, value in found.items() if value}
 
 
 def _daily(payload: dict) -> str:

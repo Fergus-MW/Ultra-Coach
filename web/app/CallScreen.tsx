@@ -19,6 +19,7 @@ import {
   wsUrl,
 } from '@/lib/runner';
 import { Ringtone, unlockAudio } from '@/lib/ringtone';
+import Watch from './Watch';
 import styles from './call.module.css';
 
 type Screen = 'standby' | 'ringing' | 'connecting' | 'live' | 'ended';
@@ -347,9 +348,7 @@ export default function CallScreen({ onProducts }: Props) {
               </p>
               {wearable.connected ? (
                 <>
-                  <p className={styles.wearable}>
-                    {wearable.summary || 'Waiting for the first sync.'}
-                  </p>
+                  <Watch panel={wearable.panel ?? {}} />
                   <button
                     className={styles.demoButton}
                     disabled={busy !== ''}

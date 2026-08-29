@@ -952,6 +952,42 @@ def test_a_resent_day_updates_rather_than_duplicates(wearable: Wearable) -> None
     assert "3,000 steps" not in block
 
 
+def test_the_panel_carries_the_numbers_behind_each_line(wearable: Wearable) -> None:
+    ran(wearable.record("fergus", "daily", a_day(14000)))
+    ran(wearable.record("fergus", "sleep", a_night(7.5)))
+    ran(wearable.record("fergus", "activity", a_run()))
+
+    panel = wearable.panel("fergus")
+
+    assert panel["provider"] == "Fitbit"
+    assert panel["daily"]["steps"] == 14000 and panel["daily"]["resting_bpm"] == 46
+    assert panel["sleep"]["asleep_minutes"] == 450 and panel["sleep"]["efficiency_percent"] == 84
+    assert panel["activity"]["km"] == 21.1 and panel["activity"]["pace_per_km"] == "5:55"
+    # Absent readings are missing rather than zeroed: the screen shows only real numbers.
+    assert "hrv_ms" not in panel["sleep"]
+
+
+def test_a_record_the_coach_already_holds_still_reaches_the_screen(
+    wearable: Wearable,
+) -> None:
+    # Only the spoken summaries survive a redeploy, so the numbers have to be rebuilt
+    # from a pull in which every record comes back unchanged.
+    run = a_run()
+    ran(wearable.record("fergus", "activity", run))
+    wearable._snapshots["fergus"].measured.clear()
+
+    assert ran(wearable.record("fergus", "activity", run)) == ""
+    assert wearable.panel("fergus")["activity"]["km"] == 21.1
+
+
+def test_a_stale_night_is_not_shown_on_screen_either(wearable: Wearable) -> None:
+    old = a_night()
+    old["end_time"] = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    ran(wearable.record("fergus", "sleep", old))
+
+    assert "sleep" not in wearable.panel("fergus")
+
+
 def test_connecting_creates_the_runner_once_and_asks_for_consent(
     client: TestClient, wearable: Wearable, monkeypatch
 ) -> None:
@@ -1124,7 +1160,7 @@ def test_wearable_data_stays_dead_without_a_platform(client: TestClient) -> None
     status = client.get(f"/api/wearable?user_id={identity['user_id']}", headers=headers).json()
     connect = client.post(f"/api/wearable/connect?user_id={identity['user_id']}", headers=headers)
 
-    assert status == {"available": False, "connected": False, "summary": ""}
+    assert status == {"available": False, "connected": False, "summary": "", "panel": {}}
     assert connect.status_code == 503
 
 

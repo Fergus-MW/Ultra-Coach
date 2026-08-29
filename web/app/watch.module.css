@@ -1,0 +1,50 @@
+.grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(96px, 1fr));
+  gap: 10px;
+  width: 100%;
+  max-width: 420px;
+}
+
+@media (max-width: 380px) {
+  .grid {
+    grid-template-columns: repeat(2, minmax(96px, 1fr));
+  }
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 10px;
+  border: 1px solid #26384a;
+  border-radius: 14px;
+  background: #101c27;
+  text-align: left;
+}
+
+.label {
+  color: #6c7f90;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.value {
+  color: #f4f7fa;
+  font-size: 19px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.note {
+  color: #7d8fa0;
+  font-size: 11px;
+}
+
+.source,
+.empty {
+  margin: 0;
+  color: #6c7f90;
+  font-size: 13px;
+}
