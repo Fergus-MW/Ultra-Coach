@@ -34,6 +34,8 @@ services:
         sync: false
       - key: WEARABLES_API_KEY
         sync: false
+      - key: WEARABLES_PROVIDER
+        sync: false
       - key: DATABASE_URL
         fromDatabase:
           name: ultracoach-db

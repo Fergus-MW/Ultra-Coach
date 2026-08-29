@@ -23,7 +23,6 @@ log = logging.getLogger(__name__)
 # A day is rewritten as more of it syncs, and a week-old resting heart rate is not what
 # the coach should be shouting about.
 FRESH_FOR = timedelta(days=8)
-PROVIDER = "fitbit"
 
 
 class WearableError(RuntimeError):
@@ -78,10 +77,11 @@ class Wearable:
         if not self.configured:
             raise WearableError("no wearables platform is configured")
 
+        settings = get_settings()
         user_id = await self.ensure_user(runner_id)
         payload = await self._call(
             "GET",
-            f"/api/v1/oauth/{PROVIDER}/authorize",
+            f"/api/v1/oauth/{settings.wearables_provider}/authorize",
             params={"user_id": user_id, "redirect_uri": redirect_to},
         )
         url = str(payload.get("authorization_url") or "")
@@ -98,7 +98,7 @@ class Wearable:
         user_id = str(created.get("id") or "")
         if not user_id:
             raise WearableError("the wearables platform created no user")
-        await self.link(user_id, runner_id, PROVIDER)
+        await self.link(user_id, runner_id, get_settings().wearables_provider)
         return user_id
 
     async def link(self, external_user_id: str, runner_id: str, provider: str = "") -> None:
