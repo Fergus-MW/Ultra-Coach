@@ -36,6 +36,9 @@ export class Speaker {
   private listeners = new Set<SpokenListener>();
   private audioConfigured = false;
   private suppressed = false;
+  /** Bumped by every stop or interruption; an in-flight play checks it before acting. */
+  private generation = 0;
+  private cancelPlayback: (() => void) | null = null;
 
   setOptions(options: SpeakerOptions): void {
     this.options = options;
@@ -85,7 +88,9 @@ export class Speaker {
   }
 
   private stopCurrent(): void {
+    this.generation += 1;
     Speech.stop();
+    this.cancelPlayback?.();
     if (this.player) {
       try {
         this.player.remove();
@@ -103,20 +108,27 @@ export class Speaker {
   }
 
   private async play(cue: Cue): Promise<void> {
+    const generation = ++this.generation;
+    const live = () => generation === this.generation;
     this.current = cue;
     await this.configureAudio();
+    if (!live()) return;
     const uri = await this.resolveAudio(cue);
+    if (!live()) return;
     if (uri) {
       try {
         await this.playFile(uri);
+        if (!live()) return;
         this.finish(cue);
         return;
       } catch {
         // Fall through to the device voice.
       }
+      if (!live()) return;
     }
     if (this.options.allowDeviceFallback) {
       await this.speakOnDevice(cue.text);
+      if (!live()) return;
     }
     this.finish(cue);
   }
@@ -133,8 +145,9 @@ export class Speaker {
     if (!voice?.apiKey) return null;
     const cached = cachedPhraseUri(cue.text, voice);
     if (cached) return cached;
-    if (cue.dynamic && !this.options.allowLiveSynthesis) return null;
-    if (!this.options.allowLiveSynthesis) return null;
+    // A static line that missed the cache is time sensitive: fall straight
+    // through to the device voice rather than waiting on the network.
+    if (!cue.dynamic || !this.options.allowLiveSynthesis) return null;
     try {
       return await synthesizeToCache(cue.text, voice);
     } catch {
@@ -157,6 +170,7 @@ export class Speaker {
       const done = () => {
         if (settled) return;
         settled = true;
+        this.cancelPlayback = null;
         subscription.remove();
         try {
           player.remove();
@@ -168,6 +182,7 @@ export class Speaker {
       const subscription = player.addListener('playbackStatusUpdate', (status) => {
         if (status.didJustFinish) done();
       });
+      this.cancelPlayback = done;
       player.play();
       // Safety net: never wedge the queue if the player stops reporting.
       setTimeout(done, 30_000);

@@ -222,15 +222,23 @@ class RunSessionController {
   pause(): void {
     if (useRunStore.getState().status !== 'running') return;
     this.pausedAt = Date.now();
+    this.tracker?.setPaused(true);
     this.speaker.stop();
     useRunStore.getState().set({ status: 'paused' });
   }
 
   resume(): void {
     if (useRunStore.getState().status !== 'paused') return;
-    if (this.pausedAt) this.pausedMs += Date.now() - this.pausedAt;
-    this.pausedAt = null;
+    this.closePause(Date.now());
+    this.tracker?.setPaused(false);
     useRunStore.getState().set({ status: 'running' });
+  }
+
+  /** Banks the pause that is currently open, so it is counted exactly once. */
+  private closePause(now: number): void {
+    if (this.pausedAt === null) return;
+    this.pausedMs += Math.max(0, now - this.pausedAt);
+    this.pausedAt = null;
   }
 
   async stop(): Promise<CompletedRun | null> {
@@ -238,10 +246,10 @@ class RunSessionController {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     const now = Date.now();
-    const metrics: RunMetrics = {
-      ...this.tracker.metrics(now),
-      elapsedMs: this.tracker.metrics(now).elapsedMs - this.pausedMs,
-    };
+    this.closePause(now);
+    this.tracker.setPaused(false);
+    const tracked = this.tracker.metrics(now);
+    const metrics: RunMetrics = { ...tracked, elapsedMs: Math.max(0, tracked.elapsedMs - this.pausedMs) };
     this.engine.finish(metrics).forEach((cue) => this.speak(cue));
 
     const run: CompletedRun = {
@@ -270,8 +278,12 @@ class RunSessionController {
     return run;
   }
 
-  reset(): void {
-    this.speaker.stop();
+  /**
+   * Clears run state for the next run. The closing cues queued by `stop()` are
+   * left to play out unless the caller explicitly silences them.
+   */
+  reset(silenceAudio = true): void {
+    if (silenceAudio) this.speaker.stop();
     useRunStore.getState().set({ status: 'idle', metrics: EMPTY_METRICS, cues: [], segmentLabel: null });
   }
 }

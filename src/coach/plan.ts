@@ -33,6 +33,12 @@ export function isoDateAfter(startIso: string, days: number): string {
   return new Date(date.getTime() + days * MS_PER_DAY).toISOString().slice(0, 10);
 }
 
+export function daysBetween(startIso: string, endIso: string): number {
+  const start = new Date(`${startIso}T00:00:00Z`).getTime();
+  const end = new Date(`${endIso}T00:00:00Z`).getTime();
+  return Math.max(0, Math.round((end - start) / MS_PER_DAY));
+}
+
 export function weeksBetween(startIso: string, endIso: string): number {
   const start = new Date(`${startIso}T00:00:00Z`).getTime();
   const end = new Date(`${endIso}T00:00:00Z`).getTime();
@@ -144,6 +150,7 @@ function notesFor(type: SessionType): string {
  */
 export function generatePlan(config: PlanConfig): TrainingPlan {
   const totalWeeks = weeksBetween(config.startDateIso, config.raceDateIso);
+  const raceDayIndex = daysBetween(config.startDateIso, config.raceDateIso);
   const template = WEEK_TEMPLATES[config.daysPerWeek];
   const weeks: PlanWeek[] = [];
   let volume = config.currentWeeklyMin;
@@ -176,11 +183,11 @@ export function generatePlan(config: PlanConfig): TrainingPlan {
     template.forEach((slot, dayOfWeek) => {
       if (!slot) return;
       const dayIndex = weekIndex * 7 + dayOfWeek;
-      const isRaceDay = phase === 'race' && slot === 'long';
-      const type: SessionType = isRaceDay ? 'long' : slot === ('quality' as SessionType) ? qualityType : slot;
+      // Nothing is scheduled on race day or after it.
+      if (dayIndex >= raceDayIndex) return;
+      const type: SessionType = slot === ('quality' as SessionType) ? qualityType : slot;
       let durationMin: number;
-      if (isRaceDay) durationMin = Math.round(config.raceDistanceKm * 7.5);
-      else if (slot === 'long') durationMin = weekLongRun;
+      if (slot === 'long') durationMin = weekLongRun;
       else if (slot === ('quality' as SessionType)) durationMin = qualityMin;
       else durationMin = Math.round(easyBudget / Math.max(1, easySlots));
       if (durationMin < 15) return;
@@ -190,13 +197,27 @@ export function generatePlan(config: PlanConfig): TrainingPlan {
         dayIndex,
         weekIndex,
         type,
-        title: isRaceDay ? `${config.raceName} · race day` : titleFor(type, durationMin, config.raceDistanceKm),
+        title: titleFor(type, durationMin, config.raceDistanceKm),
         durationMin,
         targetZone: TARGET_ZONE[type],
-        notes: isRaceDay ? 'Start slower than feels right. Eat from the first hour.' : notesFor(type),
-        segments: isRaceDay ? undefined : segmentsFor(type, durationMin),
+        notes: notesFor(type),
+        segments: segmentsFor(type, durationMin),
       });
     });
+
+    // Race day is pinned to the configured date, not to a template weekday.
+    if (weekIndex === totalWeeks - 1) {
+      sessions.push({
+        id: `race-${raceDayIndex}`,
+        dayIndex: raceDayIndex,
+        weekIndex,
+        type: 'long',
+        title: `${config.raceName} · race day`,
+        durationMin: Math.round(config.raceDistanceKm * 7.5),
+        targetZone: TARGET_ZONE.long,
+        notes: 'Start slower than feels right. Eat from the first hour.',
+      });
+    }
 
     weeks.push({
       index: weekIndex,

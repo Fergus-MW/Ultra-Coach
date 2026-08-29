@@ -40,7 +40,7 @@ export default function RunScreen() {
   const onStop = async () => {
     talk.stop();
     await runSession.stop();
-    runSession.reset();
+    runSession.reset(false);
     router.back();
   };
 

@@ -93,6 +93,8 @@ export class RunTracker {
   private lossM = 0;
   private timeInZoneMs: Record<ZoneNumber, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
   private lastZoneAt: number | null = null;
+  private lastZone: ZoneNumber | null = null;
+  private paused = false;
 
   constructor(startedAt: number, zones: HeartRateZones = DEFAULT_ZONES) {
     this.startedAt = startedAt;
@@ -103,7 +105,23 @@ export class RunTracker {
     this.zones = zones;
   }
 
+  /**
+   * Samples arriving while paused are dropped, and continuity is broken on
+   * resume so the gap is not billed as distance or time in zone.
+   */
+  setPaused(paused: boolean): void {
+    if (paused === this.paused) return;
+    this.paused = paused;
+    if (paused) return;
+    this.lastLocation = null;
+    this.lastZoneAt = null;
+    this.lastZone = null;
+    this.rawAltitudes = [];
+    this.referenceAltitude = null;
+  }
+
   addLocation(sample: LocationSample): void {
+    if (this.paused) return;
     if (sample.accuracy !== null && sample.accuracy > MAX_ACCURACY_M) return;
     const previous = this.lastLocation;
     if (previous) {
@@ -150,12 +168,15 @@ export class RunTracker {
   }
 
   addHeartRate(sample: HeartRateSample): void {
+    if (this.paused) return;
     this.heartRates.push(sample);
-    const zone = zoneForBpm(this.zones, sample.bpm);
-    if (zone && this.lastZoneAt !== null) {
+    // The interval that just elapsed was spent in the zone of the *previous*
+    // sample, not the one that has only now arrived.
+    if (this.lastZone !== null && this.lastZoneAt !== null) {
       const dt = sample.timestamp - this.lastZoneAt;
-      if (dt > 0 && dt < 30_000) this.timeInZoneMs[zone] += dt;
+      if (dt > 0 && dt < 30_000) this.timeInZoneMs[this.lastZone] += dt;
     }
+    this.lastZone = zoneForBpm(this.zones, sample.bpm);
     this.lastZoneAt = sample.timestamp;
     while (this.heartRates.length > 1 && this.heartRates[0].timestamp < sample.timestamp - 30 * 60_000) {
       this.heartRates.shift();

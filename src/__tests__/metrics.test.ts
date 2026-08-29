@@ -90,4 +90,38 @@ describe('RunTracker', () => {
     expect(metrics.heartRateAgeMs).toBe(1000);
     expect(tracker.getTimeInZoneMs()[3]).toBeGreaterThan(0);
   });
+
+  it('credits each interval to the zone it was actually spent in', () => {
+    const tracker = new RunTracker(START);
+    // Zone 2 for ten seconds, then zone 3 for ten seconds, then back.
+    tracker.addHeartRate({ bpm: 140, timestamp: START });
+    tracker.addHeartRate({ bpm: 160, timestamp: START + 10_000 });
+    tracker.addHeartRate({ bpm: 140, timestamp: START + 20_000 });
+    tracker.addHeartRate({ bpm: 140, timestamp: START + 25_000 });
+    const timeInZone = tracker.getTimeInZoneMs();
+    expect(zoneForBpm(DEFAULT_ZONES, 140)).toBe(2);
+    expect(zoneForBpm(DEFAULT_ZONES, 160)).toBe(3);
+    expect(timeInZone[2]).toBe(15_000);
+    expect(timeInZone[3]).toBe(10_000);
+  });
+
+  it('ignores samples arriving while paused and does not bridge the gap', () => {
+    const tracker = new RunTracker(START);
+    tracker.addLocation(point(0, 100));
+    tracker.addHeartRate({ bpm: 150, timestamp: START });
+    tracker.setPaused(true);
+    for (let index = 1; index <= 30; index += 1) {
+      tracker.addLocation(point(index, 100 + index));
+      tracker.addHeartRate({ bpm: 150, timestamp: START + index * 1000 });
+    }
+    tracker.setPaused(false);
+    tracker.addLocation(point(31, 131));
+    tracker.addHeartRate({ bpm: 150, timestamp: START + 31_000 });
+
+    const metrics = tracker.metrics(START + 31_000);
+    expect(metrics.distanceM).toBe(0);
+    expect(metrics.movingMs).toBe(0);
+    expect(metrics.elevationGainM).toBe(0);
+    expect(tracker.getTimeInZoneMs()[3]).toBe(0);
+  });
 });

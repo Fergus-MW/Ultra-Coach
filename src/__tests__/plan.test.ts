@@ -1,4 +1,11 @@
-import { DEFAULT_PLAN_CONFIG, generatePlan, isoDateAfter, sessionForDate, upcomingSessions } from '../coach/plan';
+import {
+  DEFAULT_PLAN_CONFIG,
+  generatePlan,
+  isoDateAfter,
+  sessionDateIso,
+  sessionForDate,
+  upcomingSessions,
+} from '../coach/plan';
 
 const CONFIG = {
   ...DEFAULT_PLAN_CONFIG,
@@ -33,6 +40,24 @@ describe('generatePlan', () => {
   it('gives every week a long run', () => {
     for (const week of plan.weeks.slice(0, -1)) {
       expect(week.sessions.some((session) => session.type === 'long')).toBe(true);
+    }
+  });
+
+  it.each([
+    ['2026-01-05', '2026-04-18'],
+    ['2026-01-07', '2026-04-11'],
+    ['2026-02-01', '2026-05-30'],
+    ['2026-03-12', '2026-06-13'],
+  ])('puts race day on the race date (start %s, race %s)', (startDateIso, raceDateIso) => {
+    const dated = generatePlan({ ...CONFIG, startDateIso, raceDateIso });
+    const sessions = dated.weeks.flatMap((week) => week.sessions);
+    const race = sessions.filter((session) => session.title.includes('race day'));
+    expect(race).toHaveLength(1);
+    expect(sessionDateIso(startDateIso, race[0])).toBe(raceDateIso);
+    // Nothing else is scheduled on or after race day.
+    for (const session of sessions) {
+      expect(sessionDateIso(startDateIso, session) <= raceDateIso).toBe(true);
+      if (session !== race[0]) expect(sessionDateIso(startDateIso, session)).not.toBe(raceDateIso);
     }
   });
 

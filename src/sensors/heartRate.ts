@@ -227,9 +227,9 @@ export class SimulatedHeartRateSource extends BaseHeartRateSource {
     this.profile = profile;
   }
 
-  /** Nudges simulated effort, so the UI can provoke a zone warning on demand. */
-  setEffortBias(bias: number): void {
-    this.effortBias = bias;
+  /** Nudges simulated effort by a number of bpm, to provoke a zone warning on demand. */
+  setEffortBias(biasBpm: number): void {
+    this.effortBias = biasBpm;
   }
 
   async start(): Promise<void> {
@@ -242,7 +242,10 @@ export class SimulatedHeartRateSource extends BaseHeartRateSource {
         0.3,
         Math.min(
           0.98,
-          this.profile.baseFraction + this.effortBias + this.profile.driftPerHour * elapsedHours + wobble,
+          this.profile.baseFraction +
+            this.effortBias / (this.profile.maxHr - this.profile.restingHr) +
+            this.profile.driftPerHour * elapsedHours +
+            wobble,
         ),
       );
       const bpm = Math.round(
