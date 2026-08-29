@@ -226,7 +226,12 @@ export default function CallScreen({ onProducts }: Props) {
     return () => document.removeEventListener('visibilitychange', refresh);
   }, []);
 
-  const awaitingSync = Boolean(wearable?.connected && !Object.keys(wearable.panel ?? {}).length);
+  const panel = wearable?.panel;
+  // The provider's name rides along with the readings, so its presence proves nothing:
+  // only an actual daily, sleep or activity record means the watch has spoken.
+  const awaitingSync = Boolean(
+    wearable?.connected && !panel?.daily && !panel?.sleep && !panel?.activity,
+  );
   useEffect(() => {
     // The platform pulls from Google in the background after consent, so the first
     // numbers arrive some seconds after the watch says it is connected. Poll until they

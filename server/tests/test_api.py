@@ -1263,6 +1263,35 @@ def test_a_fresh_connection_asks_the_platform_for_the_history(
     ]
 
 
+def test_a_backfill_the_platform_refused_is_asked_for_again(
+    wearable: Wearable, monkeypatch
+) -> None:
+    configured = main.get_settings()
+    monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")
+    monkeypatch.setattr(configured, "wearables_api_key", "sk-test")
+    monkeypatch.setattr(configured, "wearables_provider", "google")
+    ran(wearable.link("user-1", "fergus", "google", confirmed=True))
+    seen = platform(monkeypatch, wearable, {})
+    live = wearable._call
+
+    async def refuse_the_first(method: str, path: str, **kwargs) -> dict:
+        if path.endswith("/sync/historical") and not asked:
+            asked.append(path)
+            raise WearableError("the wearables platform refused: 502")
+        return await live(method, path, **kwargs)
+
+    asked: list[str] = []
+    monkeypatch.setattr(wearable, "_call", refuse_the_first)
+
+    ran(wearable.refresh("fergus"))
+    ran(wearable.refresh("fergus"))
+
+    # A refusal is not a backfill: the history has still never been pulled.
+    assert [path for method, path in seen if method == "POST"] == [
+        "/api/v1/providers/google/users/user-1/sync/historical"
+    ]
+
+
 def test_revoking_consent_takes_the_watch_away_again(wearable: Wearable, monkeypatch) -> None:
     configured = main.get_settings()
     monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")

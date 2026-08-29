@@ -38,6 +38,15 @@ export default function CoachTab() {
     return () => subscription.remove();
   }, []);
 
+  const awaitingSync = Boolean(wearable?.connected && !wearable.summary);
+  useEffect(() => {
+    // That first look lands before the platform has pulled anything from the watch, so
+    // keep asking until the numbers arrive instead of leaving an empty card behind.
+    if (!awaitingSync) return;
+    const timer = setInterval(() => void useCoach.getState().refreshWearable(), 15000);
+    return () => clearInterval(timer);
+  }, [awaitingSync]);
+
   const run = async (key: string, work: (me: Identity) => Promise<void>) => {
     if (!who) return;
     setBusy(key);

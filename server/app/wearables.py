@@ -340,8 +340,9 @@ class Wearable:
         # schedule, and a runner who has just given consent would otherwise stare at an
         # empty watch until the next sweep came round. The first ask is for the whole
         # history, because a fresh connection holds nothing at all.
-        await self._sync(user_id, historical=runner_id not in self._backfilled)
-        self._backfilled.add(runner_id)
+        wanted = runner_id not in self._backfilled
+        if await self._sync(user_id, historical=wanted) and wanted:
+            self._backfilled.add(runner_id)
 
         window = {
             "start_date": (date.today() - timedelta(days=days)).isoformat(),
@@ -365,11 +366,12 @@ class Wearable:
                     found.append((kind, fact))
         return found
 
-    async def _sync(self, user_id: str, historical: bool) -> None:
+    async def _sync(self, user_id: str, historical: bool) -> bool:
         """Ask the platform to pull from the provider now. It answers before it has.
 
         The work is queued on their side, so this call brings back nothing itself; it is
-        the poll after it that sees the data.
+        the poll after it that sees the data. False means the ask never landed, so a
+        backfill refused once is asked for again rather than written off as done.
         """
         provider = get_settings().wearables_provider
         path = f"/api/v1/providers/{provider}/users/{user_id}/sync"
@@ -377,6 +379,8 @@ class Wearable:
             await self._call("POST", f"{path}/historical" if historical else path)
         except Exception as error:  # a platform that will not sync still has a week held
             log.warning("could not ask %s to sync %s: %s", provider, user_id, error)
+            return False
+        return True
 
     async def load(self) -> None:
         """Read the connections and the last readings back at startup."""
