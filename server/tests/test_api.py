@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from time import monotonic
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -20,7 +21,7 @@ from app.healf import Catalogue, _from_page, _from_sitemap
 from app.memory import RunnerState, _format_edge
 from app.proactive import CallLog, Coach
 from app.races import Race, RaceSearchError, spoken_summary
-from app.wearables import Wearable
+from app.wearables import Wearable, WearableError
 
 TOOL_SECRET = "shhh"
 WEBHOOK_SECRET = "hook"
@@ -1075,6 +1076,52 @@ def test_disconnecting_revokes_the_consent_and_forgets_the_numbers(
     assert status["connected"] is False
     # The coach must not still be quoting a watch the runner has just taken away.
     assert status["summary"] == ""
+
+
+def test_consent_already_withdrawn_at_the_provider_still_disconnects(
+    wearable: Wearable, monkeypatch
+) -> None:
+    configured = main.get_settings()
+    monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")
+    monkeypatch.setattr(configured, "wearables_api_key", "sk-test")
+    ran(wearable.link("user-1", "fergus", "google", confirmed=True))
+
+    class Gone:
+        status_code = 404
+        content = b""
+        text = "no such connection"
+
+    async def request(self, method: str, url: str, **kwargs) -> Gone:
+        return Gone()
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", request)
+    ran(wearable.disconnect("fergus"))
+
+    assert wearable.connected("fergus") is False
+
+
+def test_a_platform_that_cannot_revoke_does_not_claim_the_watch_is_gone(
+    client: TestClient, wearable: Wearable, monkeypatch
+) -> None:
+    configured = main.get_settings()
+    monkeypatch.setattr(configured, "wearables_url", "https://wearables.test")
+    monkeypatch.setattr(configured, "wearables_api_key", "sk-test")
+    identity = client.post("/api/register").json()
+    headers = {"authorization": f"Bearer {identity['token']}"}
+    runner = identity["user_id"]
+    ran(wearable.link("user-1", runner, "google", confirmed=True))
+    ran(wearable.record(runner, "sleep", a_night(5.5)))
+
+    async def refuse(method: str, path: str, **kwargs) -> dict:
+        raise WearableError("the wearables platform refused: 502")
+
+    monkeypatch.setattr(wearable, "_call", refuse)
+    answer = client.post(f"/api/wearable/disconnect?user_id={runner}", headers=headers)
+
+    # Consent is still live over there, so the runner must not be told it was taken away.
+    assert answer.status_code == 503
+    assert wearable.connected(runner) is True
+    assert "5h 30m asleep" in wearable.block(runner)
 
 
 def test_a_week_of_running_is_not_collapsed_into_one_run(wearable: Wearable, monkeypatch) -> None:

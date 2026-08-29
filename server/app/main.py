@@ -416,7 +416,10 @@ async def wearable_disconnect(user_id: str, authorization: str = Header(default=
     """Give the watch back: the consent is revoked and the readings dropped, so the
     runner is offered the connection screen again."""
     require_runner(user_id, authorization)
-    await wearable.disconnect(user_id)
+    try:
+        await wearable.disconnect(user_id)
+    except WearableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     return {
         "available": wearable.configured,
         "connected": wearable.connected(user_id),
