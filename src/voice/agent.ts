@@ -20,6 +20,7 @@ export function useCoachConversation() {
   const [error, setError] = useState<string | null>(null);
   const lastSpoke = useRef<number>(0);
   const startedAt = useRef<number>(0);
+  const vad = useRef<{ score: number; at: number }>({ score: 0, at: 0 });
   const contextTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const silenceTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -50,7 +51,8 @@ export function useCoachConversation() {
           startedAt: startedAt.current,
           lastSpoke: lastSpoke.current,
           agentSpeaking: conversationRef.current?.isSpeaking ?? false,
-          inputLevel: conversationRef.current?.getInputVolume() ?? 0,
+          vadScore: vad.current.score,
+          vadAt: vad.current.at,
         };
         if (runnerIsActive(activity)) lastSpoke.current = activity.now;
         if (shouldEndSession(activity)) stopRef.current();
@@ -60,6 +62,9 @@ export function useCoachConversation() {
       clearTimers();
       setStatus('idle');
       runSession.setVoiceSuppressed(false);
+    },
+    onVadScore: ({ vadScore }: { vadScore: number }) => {
+      vad.current = { score: vadScore, at: Date.now() };
     },
     onMessage: ({ source }: { source: 'user' | 'ai' }) => {
       // Only the runner speaking counts as activity: the agent asks "are you still

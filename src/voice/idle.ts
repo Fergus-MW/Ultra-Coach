@@ -2,21 +2,26 @@
 export const SILENCE_TIMEOUT_MS = 30_000;
 /** A talkative agent must not be able to hold the mic open forever. */
 export const MAX_SESSION_MS = 5 * 60_000;
-/** Mic level that counts as the runner talking rather than wind and footfall. */
-export const SPEECH_LEVEL = 0.05;
+/** ElevenLabs' own speech probability; wind and footfall score well below this. */
+export const SPEECH_PROBABILITY = 0.5;
+/** A score older than this describes a runner who has already stopped talking. */
+export const VAD_FRESHNESS_MS = 2_000;
 
 export type SessionActivity = {
   now: number;
   startedAt: number;
   lastSpoke: number;
   agentSpeaking: boolean;
-  inputLevel: number;
+  /** Latest `onVadScore` value and when it arrived. */
+  vadScore: number;
+  vadAt: number;
 };
 
-/** A long uninterrupted answer only reaches `onMessage` once it ends, so the live
- * mic level has to count as activity too, or the runner is cut off mid-sentence. */
+/** A long uninterrupted answer only reaches `onMessage` once it ends, so the agent's
+ * voice-activity score has to count as activity too, or the runner is cut off. */
 export function runnerIsActive(activity: SessionActivity): boolean {
-  return activity.inputLevel >= SPEECH_LEVEL;
+  if (activity.now - activity.vadAt > VAD_FRESHNESS_MS) return false;
+  return activity.vadScore >= SPEECH_PROBABILITY;
 }
 
 export function shouldEndSession(activity: SessionActivity): boolean {
