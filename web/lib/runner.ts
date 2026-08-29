@@ -134,7 +134,7 @@ export async function wearableStatus(who: Identity): Promise<WearableStatus> {
 }
 
 /**
- * The connection page, opened in a new tab: the runner picks Fitbit and logs in there,
+ * The connection page, opened in a new tab: the runner signs into Google there,
  * so no provider credential reaches this app — and there is still nothing to type here.
  */
 export async function connectWearable(who: Identity): Promise<string> {
