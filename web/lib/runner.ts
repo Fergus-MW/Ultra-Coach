@@ -139,6 +139,8 @@ export async function wearableStatus(who: Identity): Promise<WearableStatus> {
   const query = new URLSearchParams({ user_id: who.userId });
   const response = await fetch(`${apiBase}/api/wearable?${query}`, {
     headers: { authorization: `Bearer ${who.token}` },
+    // Polled on a loop, so a request that never answers must not stop the next one.
+    signal: AbortSignal.timeout(45_000),
   });
   if (!response.ok) {
     throw new Error(`wearable ${response.status}: ${await response.text()}`);

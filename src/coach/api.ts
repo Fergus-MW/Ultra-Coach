@@ -26,6 +26,9 @@ export type Product = {
 
 export type WearableStatus = { available: boolean; connected: boolean; summary: string };
 
+/** Long enough for a sleeping backend to wake, short enough that a poll resumes. */
+export const WATCH_WAIT_MS = 45_000;
+
 export type Scenario = 'checkin' | 'races' | 'products' | 'excuse' | 'body';
 
 /** Where the coaching backend lives. A build can point at a local one instead. */
@@ -89,7 +92,7 @@ export async function forgetIdentity(): Promise<void> {
 async function request<T>(
   method: 'GET' | 'POST',
   path: string,
-  options: { token?: string; body?: unknown } = {},
+  options: { token?: string; body?: unknown; timeoutMs?: number } = {},
 ): Promise<T> {
   if (!apiBase) throw new Error('No coaching backend configured for this build.');
 
@@ -97,15 +100,25 @@ async function request<T>(
   if (options.token) headers.authorization = `Bearer ${options.token}`;
   if (options.body !== undefined) headers['content-type'] = 'application/json';
 
-  const response = await fetch(`${apiBase}${path}`, {
-    method,
-    headers,
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
-  });
-  if (!response.ok) {
-    throw new Error(`${path} ${response.status}: ${await response.text()}`);
+  // A request that never answers would otherwise hold a repeating caller still forever.
+  const giveUp = new AbortController();
+  const bound = options.timeoutMs
+    ? setTimeout(() => giveUp.abort(), options.timeoutMs)
+    : undefined;
+  try {
+    const response = await fetch(`${apiBase}${path}`, {
+      method,
+      headers,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal: giveUp.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`${path} ${response.status}: ${await response.text()}`);
+    }
+    return (await response.json()) as T;
+  } finally {
+    if (bound !== undefined) clearTimeout(bound);
   }
-  return (await response.json()) as T;
 }
 
 /** The phone's own zone: the coach orders a session for "5 a.m." and has to mean theirs. */
@@ -138,7 +151,10 @@ export async function fetchProducts(who: Identity, need = ''): Promise<Product[]
 /** Whether the coach can see this runner's watch, and what it currently reads. */
 export function wearableStatus(who: Identity): Promise<WearableStatus> {
   const query = new URLSearchParams({ user_id: who.userId });
-  return request<WearableStatus>('GET', `/api/wearable?${query}`, { token: who.token });
+  return request<WearableStatus>('GET', `/api/wearable?${query}`, {
+    token: who.token,
+    timeoutMs: WATCH_WAIT_MS,
+  });
 }
 
 /**
