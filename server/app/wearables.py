@@ -183,15 +183,21 @@ class Wearable:
         if not user_id:
             return False
         payload = await self._call("GET", f"/api/v1/users/{user_id}/connections")
-        active = [
-            connection
-            for connection in payload.get("data") or []
-            if isinstance(connection, dict) and connection.get("status") == "active"
-        ]
-        if not active:
+        wanted = get_settings().wearables_provider
+        live = next(
+            (
+                connection
+                for connection in payload.get("data") or []
+                if isinstance(connection, dict)
+                and connection.get("status") == "active"
+                and str(connection.get("provider") or "") == wanted
+            ),
+            None,
+        )
+        if live is None:
             await self._revoke(runner_id)
             return False
-        await self.link(user_id, runner_id, str(active[0].get("provider") or ""), confirmed=True)
+        await self.link(user_id, runner_id, wanted, confirmed=True)
         return True
 
     async def _revoke(self, runner_id: str) -> None:
