@@ -14,10 +14,10 @@ development build.
   `platforms;android-36`, `build-tools;36.0.0`, `emulator`,
   `system-images;android-35;google_apis;x86_64`). Export `ANDROID_HOME`/`ANDROID_SDK_ROOT`.
 - AVD: `avdmanager create avd -n uc -k "system-images;android-35;google_apis;x86_64" -d pixel_6`.
-- KVM: `sudo gpasswd -a ubuntu kvm && sudo chmod 666 /dev/kvm`, then launch the emulator
-  through `sg kvm -c "$ANDROID_HOME/emulator/emulator -avd uc -no-boot-anim -gpu swiftshader_indirect"`
-  (group membership is not picked up in the current shell otherwise). Re-apply the chmod
-  after any VM reboot.
+- KVM: `sudo gpasswd -a ubuntu kvm`, then launch the emulator through
+  `sg kvm -c "$ANDROID_HOME/emulator/emulator -avd uc -no-boot-anim -gpu swiftshader_indirect"`
+  (group membership is not picked up in the current shell otherwise). Keep `/dev/kvm` group
+  owned by `kvm` — do not `chmod 666` it, which would hand every local process the hypervisor.
 
 ## Known build blockers and workarounds
 - **Maven Central HTTP 429** from this egress IP breaks Gradle plugin/dependency
