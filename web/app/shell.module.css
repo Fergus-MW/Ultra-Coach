@@ -1,0 +1,45 @@
+.tabs {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  background: rgba(5, 8, 11, 0.86);
+  backdrop-filter: blur(12px);
+  border-top: 1px solid #1b2734;
+}
+
+.tab,
+.active {
+  position: relative;
+  border: none;
+  border-radius: 999px;
+  padding: 10px 26px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  background: transparent;
+  color: #8ea0b1;
+}
+
+.active {
+  background: #1f2c3a;
+  color: #f4f7fa;
+}
+
+.badge {
+  position: absolute;
+  top: 2px;
+  right: 6px;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  padding: 0 5px;
+  font-size: 11px;
+  line-height: 18px;
+  color: #06090c;
+  background: #3ddc84;
+}

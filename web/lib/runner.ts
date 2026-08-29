@@ -82,6 +82,31 @@ export type SessionGrant = {
   runner_sig: string;
 };
 
+export type Product = {
+  handle: string;
+  title: string;
+  url: string;
+  image: string;
+  brand: string;
+  price: string;
+  currency: string;
+  description: string;
+};
+
+/** Healf's range, read through the backend so the tab and the coach agree on it. */
+export async function fetchProducts(who: Identity, need = ""): Promise<Product[]> {
+  const query = new URLSearchParams({ user_id: who.userId });
+  if (need) query.set("need", need);
+
+  const response = await fetch(`${apiBase}/api/products?${query}`, {
+    headers: { authorization: `Bearer ${who.token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`products ${response.status}: ${await response.text()}`);
+  }
+  return (await response.json()).products;
+}
+
 export async function requestSession(who: Identity): Promise<SessionGrant> {
   const response = await fetch(`${apiBase}/api/session`, {
     method: "POST",

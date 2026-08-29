@@ -39,6 +39,13 @@ class Ringer:
             {"type": "incoming_call", "opening_line": opening_line, "reason": reason},
         )
 
+    async def show_products(self, user_id: str, need: str, products: list[dict]) -> int:
+        """The coach drives the screen: recommended products appear while it talks."""
+        return await self._send(
+            user_id,
+            {"type": "show_products", "need": need, "products": products},
+        )
+
     async def cancel(self, user_id: str, except_socket: WebSocket | None = None) -> int:
         """One tab took the call, so every other tab has to stop ringing."""
         return await self._send(user_id, {"type": "call_cancelled"}, skip=except_socket)

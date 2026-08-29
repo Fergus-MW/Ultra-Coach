@@ -3,7 +3,14 @@
 import { useConversation } from "@elevenlabs/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { forgetIdentity, identity, type Identity, requestSession, wsUrl } from "@/lib/runner";
+import {
+  forgetIdentity,
+  identity,
+  type Identity,
+  type Product,
+  requestSession,
+  wsUrl,
+} from "@/lib/runner";
 import { Ringtone, unlockAudio } from "@/lib/ringtone";
 import styles from "./call.module.css";
 
@@ -11,7 +18,12 @@ type Screen = "standby" | "ringing" | "connecting" | "live" | "ended";
 
 type IncomingCall = { opening_line: string; reason: string };
 
-export default function CallScreen() {
+type Props = {
+  /** The coach recommending products takes the runner to them. */
+  onProducts: (need: string, products: Product[]) => void;
+};
+
+export default function CallScreen({ onProducts }: Props) {
   const [screen, setScreen] = useState<Screen>("standby");
   const [incoming, setIncoming] = useState<IncomingCall | null>(null);
   const [online, setOnline] = useState(false);
@@ -90,6 +102,10 @@ export default function CallScreen() {
           setScreen((current) => (current === "live" ? "ended" : "standby"));
           return;
         }
+        if (payload.type === "show_products") {
+          onProducts(payload.need ?? "", payload.products ?? []);
+          return;
+        }
         if (payload.type !== "incoming_call") return;
 
         cancelled.current = false;
@@ -118,7 +134,7 @@ export default function CallScreen() {
       socket.current?.close();
       ringtone.current?.stop();
     };
-  }, [silence]);
+  }, [silence, onProducts]);
 
   const answer = useCallback(async () => {
     silence();

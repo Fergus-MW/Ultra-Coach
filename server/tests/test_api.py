@@ -5,12 +5,14 @@ import json
 import time
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from time import monotonic
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app import main
+from app import healf, main
 from app.auth import sign
+from app.healf import Catalogue, _from_page, _from_sitemap
 from app.memory import RunnerState, _format_edge
 from app.proactive import CallLog, Coach
 from app.races import Race, RaceSearchError, spoken_summary
@@ -506,3 +508,122 @@ def test_a_late_failure_keeps_a_newer_cooldown() -> None:
     throttle.refund("fergus", first)
 
     assert throttle._last["fergus"] == 1_000.0
+
+
+def _product(handle: str, title: str) -> healf.Product:
+    return healf.Product(handle=handle, title=title, url=f"https://healf.com/products/{handle}")
+
+
+def test_the_products_tab_needs_a_device_token(client: TestClient) -> None:
+    assert client.get("/api/products", params={"user_id": "fergus"}).status_code == 401
+
+
+def test_the_products_tab_lists_the_range(client: TestClient, monkeypatch) -> None:
+    identity = client.post("/api/register").json()
+
+    async def featured() -> list[healf.Product]:
+        return [_product("magnesium", "Magnesium Glycinate")]
+
+    monkeypatch.setattr(main.catalogue, "featured", featured)
+    response = client.get(
+        "/api/products",
+        params={"user_id": identity["user_id"]},
+        headers={"authorization": f"Bearer {identity['token']}"},
+    )
+
+    assert [item["title"] for item in response.json()["products"]] == ["Magnesium Glycinate"]
+
+
+def test_recommending_products_pushes_them_to_the_runners_tabs(
+    client: TestClient, monkeypatch
+) -> None:
+    identity = client.post("/api/register").json()
+
+    async def search(need: str, limit: int = 6) -> list[healf.Product]:
+        return [_product("electrolytes", "Electrolyte Powder")]
+
+    monkeypatch.setattr(main.catalogue, "search", search)
+    url = f"/ws/{identity['user_id']}?token={identity['token']}"
+
+    with client.websocket_connect(url) as tab:
+        response = client.post(
+            "/tools/recommend-products",
+            json={
+                "need": "cramp on long runs",
+                "runner_id": identity["user_id"],
+                "runner_sig": sign(identity["user_id"]),
+            },
+            headers=TOOL_HEADERS,
+        )
+        pushed = tab.receive_json()
+
+    assert response.json()["shown_on_screens"] == 1
+    assert pushed["type"] == "show_products"
+    assert pushed["products"][0]["title"] == "Electrolyte Powder"
+    assert "Electrolyte Powder" in response.json()["spoken_summary"]
+
+
+def test_products_are_not_pushed_at_an_unsigned_runner(client: TestClient, monkeypatch) -> None:
+    identity = client.post("/api/register").json()
+
+    async def search(need: str, limit: int = 6) -> list[healf.Product]:
+        return [_product("sleep", "Sleep Drops")]
+
+    monkeypatch.setattr(main.catalogue, "search", search)
+    url = f"/ws/{identity['user_id']}?token={identity['token']}"
+
+    with client.websocket_connect(url) as tab:
+        response = client.post(
+            "/tools/recommend-products",
+            json={"need": "sleep", "runner_id": identity["user_id"], "runner_sig": "forged"},
+            headers=TOOL_HEADERS,
+        )
+        assert response.json()["shown_on_screens"] == 0
+        # The coach still gets its answer; nothing reaches the impersonated runner.
+        tab.send_json({"type": "call_declined"})
+
+
+def test_the_catalogue_ranks_the_closest_title() -> None:
+    import asyncio
+
+    index = Catalogue()
+    index._items = [
+        _product("multi", "Complete Multivitamin with Magnesium and Zinc"),
+        _product("mag", "Magnesium Glycinate"),
+    ]
+    index._loaded_at = monotonic()
+    index._details = {item.handle: (monotonic(), item) for item in index._items}
+
+    found = asyncio.run(index.search("magnesium for cramp"))
+
+    assert [item.handle for item in found] == ["mag", "multi"]
+
+
+def test_a_product_page_fills_in_price_and_brand() -> None:
+    page = (
+        '<script type="application/ld+json">'
+        '{"@type": "Product", "name": "D3 & K2 Complex", "brand": {"@name": "x", "name": "Vivo"},'
+        ' "description": "Bones  and immunity.",'
+        ' "offers": {"price": "14.49", "priceCurrency": "GBP"}}'
+        "</script>"
+    )
+    full = _from_page(_product("d3", "D3"), page)
+
+    assert (full.title, full.brand, full.price) == ("D3 & K2 Complex", "Vivo", "14.49")
+    assert full.description == "Bones and immunity."
+
+
+def test_the_sitemap_gives_a_title_and_an_image() -> None:
+    entry = (
+        "<url><loc>https://healf.com/products/b12</loc>"
+        "<image:loc>https://cdn.shopify.com/b12.png</image:loc>"
+        "<image:title>B12 &#45; Orange</image:title></url>"
+    )
+    item = _from_sitemap(entry)
+
+    assert item is not None
+    assert (item.handle, item.title, item.image) == (
+        "b12",
+        "B12 - Orange",
+        "https://cdn.shopify.com/b12.png",
+    )

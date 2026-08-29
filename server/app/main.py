@@ -22,6 +22,8 @@ from pydantic import BaseModel, Field
 
 from .auth import bearer, issue_identity, sign, verify, verify_webhook
 from .config import Settings, get_settings
+from .healf import HealfError, catalogue
+from .healf import spoken_summary as product_summary
 from .llm import chat_completion
 from .memory import Memory
 from .proactive import Coach
@@ -151,6 +153,14 @@ class CallRequest(BaseModel):
     force: bool = False
 
 
+class ProductQuery(BaseModel):
+    """What the coach thinks the runner needs, in its own words."""
+
+    need: str = Field(max_length=200)
+    runner_id: str = Field(default="", max_length=120)
+    runner_sig: str = Field(default="", max_length=200)
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
@@ -267,6 +277,49 @@ async def tool_search_races(body: RaceQuery) -> dict:
         log.warning("race search failed: %s", error)
         raise HTTPException(status_code=502, detail=str(error)) from error
     return {"spoken_summary": spoken_summary(races), "races": [race.model_dump() for race in races]}
+
+
+@app.get("/api/products")
+async def list_products(
+    user_id: str,
+    need: str = "",
+    authorization: str = Header(default=""),
+) -> dict:
+    """The products tab. Healf's range, filtered by whatever the coach asked for."""
+    require_runner(user_id, authorization)
+    try:
+        products = await catalogue.search(need[:200]) if need else await catalogue.featured()
+    except HealfError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    return {"need": need, "products": [product.model_dump() for product in products]}
+
+
+@app.post("/tools/recommend-products", dependencies=[Depends(require_tool_secret)])
+async def tool_recommend_products(body: ProductQuery) -> dict:
+    """The coach's hands on the runner's screen: recommend out loud and show the products.
+
+    The runner id is signed, so a conversation cannot push products onto someone else's
+    tabs by naming them.
+    """
+    try:
+        products = await catalogue.search(body.need)
+    except HealfError as error:
+        log.warning("product search failed: %s", error)
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+    shown = 0
+    if products and verify(body.runner_id, body.runner_sig):
+        shown = await ringer.show_products(
+            body.runner_id,
+            body.need,
+            [product.model_dump() for product in products],
+        )
+
+    return {
+        "spoken_summary": product_summary(products),
+        "shown_on_screens": shown,
+        "products": [product.model_dump() for product in products],
+    }
 
 
 @app.post("/llm/chat/completions", dependencies=[Depends(require_tool_secret)])

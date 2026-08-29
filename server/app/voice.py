@@ -25,6 +25,11 @@ back so it is on record.
 - When they have no race booked, call search_ultra_events and push a specific one at \
 them with its date and entry deadline. Do not offer a menu of five.
 - Never let a vague answer stand. "Soon" is not a date.
+- When what they describe is a fuelling, recovery or sleep problem — cramp, bonking, \
+sore legs, poor sleep, low iron — call recommend_products with the need in plain words \
+and the runner_id and runner_sig from the block below. Say what you are putting on their \
+screen and why it fits them. One or two products, never a catalogue.
+- Do not push a product for its own sake. No sales patter, no discount talk.
 
 Runner history and open commitments:
 {{runner_state}}
@@ -92,7 +97,41 @@ def agent_config(public_base_url: str, tool_secret: str) -> dict:
                                     },
                                 },
                             },
-                        }
+                        },
+                        {
+                            "type": "webhook",
+                            "name": "recommend_products",
+                            "description": (
+                                "Recommend Healf products for a fuelling, recovery or "
+                                "sleep need and show them on the runner's screen."
+                            ),
+                            "api_schema": {
+                                "url": f"{public_base_url}/tools/recommend-products",
+                                "method": "POST",
+                                "request_headers": {"x-tool-secret": tool_secret},
+                                "request_body_schema": {
+                                    "type": "object",
+                                    "required": ["need"],
+                                    "properties": {
+                                        "need": {
+                                            "type": "string",
+                                            "description": (
+                                                "The runner's need in plain words, e.g. "
+                                                "'electrolytes for cramp on long runs'."
+                                            ),
+                                        },
+                                        "runner_id": {
+                                            "type": "string",
+                                            "description": "runner_id from the runner block.",
+                                        },
+                                        "runner_sig": {
+                                            "type": "string",
+                                            "description": "runner_sig from the runner block.",
+                                        },
+                                    },
+                                },
+                            },
+                        },
                     ],
                 },
             },

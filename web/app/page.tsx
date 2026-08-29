@@ -1,10 +1,10 @@
-import CallScreen from "./CallScreen";
 import Providers from "./providers";
+import Shell from "./Shell";
 
 export default function Home() {
   return (
     <Providers>
-      <CallScreen />
+      <Shell />
     </Providers>
   );
 }
