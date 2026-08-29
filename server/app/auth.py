@@ -51,14 +51,14 @@ def bearer(header: str) -> str:
     return value.strip() if scheme.lower() == "bearer" else ""
 
 
-def verify_webhook(secret: str, signature_header: str, body: bytes) -> bool:
-    """ElevenLabs sends `t=<unix>,v0=<hmac of "t.body">`.
+def verify_webhook(secret: str, signature_header: str, body: bytes, scheme: str = "v0") -> bool:
+    """ElevenLabs sends `t=<unix>,v0=<hmac of "t.body">`; other senders use another scheme.
 
     The timestamp is signed but also checked for age: without that, a captured delivery
     stays valid forever and can be replayed into a runner's history at any time.
     """
     parts = dict(piece.split("=", 1) for piece in signature_header.split(",") if "=" in piece)
-    timestamp, digest = parts.get("t", ""), parts.get("v0", "")
+    timestamp, digest = parts.get("t", ""), parts.get(scheme, "")
     if not timestamp or not digest:
         return False
 

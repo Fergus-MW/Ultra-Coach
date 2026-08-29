@@ -6,3 +6,4 @@ pydantic-settings>=2.6.0
 zep-cloud>=3.0.0
 apscheduler>=3.10.4
 python-dotenv>=1.0.1
+asyncpg>=0.30.0

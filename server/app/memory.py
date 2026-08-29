@@ -13,6 +13,7 @@ from zep_cloud.client import AsyncZep
 from zep_cloud.errors import BadRequestError, NotFoundError
 
 from .config import get_settings
+from .wearables import wearable
 
 log = logging.getLogger(__name__)
 
@@ -31,10 +32,11 @@ class RunnerState:
     user_id: str
     context: str
     commitments: list[str]
+    wearable: str = ""
 
     def as_prompt_block(self) -> str:
         commitments = "\n".join(f"- {item}" for item in self.commitments)
-        parts = [self.context.strip(), commitments.strip()]
+        parts = [self.wearable.strip(), self.context.strip(), commitments.strip()]
         block = "\n\n".join(part for part in parts if part)
         return block or "No history yet. This is the first contact with this runner."
 
@@ -148,7 +150,14 @@ class Memory:
         if isinstance(context, BaseException):
             log.warning("could not read the thread context for %s: %s", user_id, context)
             context = ""
-        return RunnerState(user_id=user_id, context=context, commitments=commitments)
+        # Read, not fetched: the numbers arrive by webhook as the watch syncs, so the
+        # coach opens the call already knowing last night's sleep and yesterday's run.
+        return RunnerState(
+            user_id=user_id,
+            context=context,
+            commitments=commitments,
+            wearable=wearable.block(user_id),
+        )
 
     async def _context(self, user_id: str) -> str:
         latest = _latest_thread_id(await self._client.user.get_threads(user_id))

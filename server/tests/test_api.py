@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -11,14 +12,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import healf, llm, main
+from app import memory as memory_module
 from app.auth import sign
+from app.db import Database
 from app.healf import Catalogue, _from_page, _from_sitemap
 from app.memory import RunnerState, _format_edge
 from app.proactive import CallLog, Coach
 from app.races import Race, RaceSearchError, spoken_summary
+from app.wearables import Wearable
 
 TOOL_SECRET = "shhh"
 WEBHOOK_SECRET = "hook"
+WEARABLE_SECRET = "wearable-hook"
 TOOL_HEADERS = {"x-tool-secret": TOOL_SECRET}
 
 
@@ -58,20 +63,71 @@ class FakeRinger:
         return 1
 
 
+def ran(awaitable):
+    """Await one call from a synchronous test."""
+    import asyncio
+
+    return asyncio.run(_awaited(awaitable))
+
+
+async def _awaited(awaitable):
+    return await awaitable
+
+
+TEST_DSN = os.environ.get(
+    "TEST_DATABASE_URL", "postgresql://postgres:postgres@127.0.0.1:5432/ultracoach_test"
+)
+
+
+def on_postgres(scenario):
+    """Run a scenario against a real database, or skip where there is not one.
+
+    The pool belongs to the loop that made it, so each scenario opens and closes its
+    own rather than sharing one across the suite.
+    """
+    import asyncio
+
+    async def run():
+        database = Database()
+        if not await database.connect(TEST_DSN):
+            return None
+        async with database.pool.acquire() as connection:
+            await connection.execute("TRUNCATE calls, wearable_links, wearable_readings")
+        try:
+            return await scenario(database)
+        finally:
+            await database.close()
+
+    outcome = asyncio.run(run())
+    if outcome is None:
+        pytest.skip(f"no Postgres at {TEST_DSN}")
+    return outcome
+
+
 @pytest.fixture(autouse=True)
 def fresh_limits() -> None:
     main._register_bucket = main.Bucket(burst=10, per_second=0.2)
 
 
 @pytest.fixture(autouse=True)
-def settings(monkeypatch, tmp_path):
+def settings(monkeypatch):
     configured = main.get_settings()
     monkeypatch.setattr(configured, "tool_secret", TOOL_SECRET)
     monkeypatch.setattr(configured, "session_secret", "signing-key")
     monkeypatch.setattr(configured, "elevenlabs_webhook_secret", WEBHOOK_SECRET)
-    monkeypatch.setattr(configured, "state_file", str(tmp_path / "calls.json"))
-    monkeypatch.setattr(main.coach, "_calls", CallLog(tmp_path / "calls.json"))
+    monkeypatch.setattr(configured, "wearables_webhook_secret", WEARABLE_SECRET)
+    monkeypatch.setattr(configured, "database_url", "")
+    monkeypatch.setattr(main.coach, "_calls", CallLog(Database()))
     return configured
+
+
+@pytest.fixture
+def wearable(monkeypatch) -> Wearable:
+    """A coach with its own empty device history, connected to nothing."""
+    fresh = Wearable(Database())
+    monkeypatch.setattr(main, "wearable", fresh)
+    monkeypatch.setattr(memory_module, "wearable", fresh)
+    return fresh
 
 
 @pytest.fixture
@@ -284,37 +340,35 @@ def test_spoken_summary_is_readable_aloud() -> None:
     assert "wider search area" in spoken_summary([])
 
 
-def test_call_cooldown_survives_a_restart(tmp_path, monkeypatch) -> None:
+def test_call_cooldown_survives_a_restart(monkeypatch) -> None:
     async def fake_opening_line(state, nudge=""):
         return "line"
 
     monkeypatch.setattr("app.proactive.opening_line", fake_opening_line)
-    path = tmp_path / "calls.json"
     memory, ringer = FakeMemory(), FakeRinger()
 
-    async def scenario() -> str:
-        await Coach(memory, ringer, path).call("fergus")
-        restarted = Coach(memory, ringer, path)  # fresh process, same disk
+    async def scenario(database: Database) -> str:
+        await Coach(memory, ringer, CallLog(database)).call("fergus")
+        restarted = Coach(memory, ringer, CallLog(database))  # fresh process, same rows
+        await restarted.restore()
         return (await restarted.call("fergus")).reason
 
-    import asyncio
-
-    assert asyncio.run(scenario()) == "already called within the cooldown"
+    assert on_postgres(scenario) == "already called within the cooldown"
 
 
-def test_online_sweep_waits_for_the_checkin_hour(monkeypatch, tmp_path) -> None:
-    coach = Coach(FakeMemory(), FakeRinger(), tmp_path / "calls.json")
+def test_online_sweep_waits_for_the_checkin_hour(monkeypatch) -> None:
+    coach = Coach(FakeMemory(), FakeRinger())
     monkeypatch.setattr(main.get_settings(), "checkin_hour_utc", 23)
     assert coach._checkin_missed("fergus") is (datetime.now(timezone.utc).hour >= 23)
 
     monkeypatch.setattr(main.get_settings(), "checkin_hour_utc", 0)
     assert coach._checkin_missed("fergus") is True
 
-    coach._calls.record("fergus", datetime.now(timezone.utc) - timedelta(minutes=1))
+    ran(coach._calls.record("fergus", datetime.now(timezone.utc) - timedelta(minutes=1)))
     assert coach._checkin_missed("fergus") is False
 
 
-def test_a_failing_runner_does_not_cancel_the_rest_of_the_sweep(tmp_path) -> None:
+def test_a_failing_runner_does_not_cancel_the_rest_of_the_sweep() -> None:
     import asyncio
 
     class ManyRunners(FakeMemory):
@@ -327,7 +381,7 @@ def test_a_failing_runner_does_not_cancel_the_rest_of_the_sweep(tmp_path) -> Non
             return await super().get_state(user_id)
 
     ringer = FakeRinger()
-    coach = Coach(ManyRunners(), ringer, tmp_path / "calls.json")
+    coach = Coach(ManyRunners(), ringer)
 
     outcomes = asyncio.run(coach.sweep())
 
@@ -796,3 +850,187 @@ def test_the_runners_history_is_read_once_per_call(monkeypatch) -> None:
 
     asyncio.run(two_turns())
     assert reads == ["fergus"]
+
+
+def wearable_signed(payload: dict) -> tuple[bytes, dict[str, str]]:
+    body = json.dumps(payload).encode()
+    timestamp = str(int(time.time()))
+    digest = hmac.new(WEARABLE_SECRET.encode(), f"{timestamp}.".encode() + body, sha256).hexdigest()
+    return body, {
+        "content-type": "application/json",
+        "x-webhook-signature": f"t={timestamp},v1={digest}",
+    }
+
+
+def a_night(hours: float = 6.0) -> dict:
+    now = datetime.now(timezone.utc)
+    return {
+        "metadata": {
+            "start_time": (now - timedelta(hours=hours)).isoformat(),
+            "end_time": now.isoformat(),
+            "summary_id": "night-1",
+        },
+        "sleep_durations_data": {
+            "asleep": {"duration_asleep_state_seconds": hours * 3600},
+            "sleep_efficiency": 0.84,
+        },
+        "scores": {"sleep": 61},
+    }
+
+
+def test_wearable_payloads_reach_the_runners_prompt(wearable: Wearable) -> None:
+    ran(wearable.link("device-1", "fergus", "Fitbit"))
+    ran(wearable.record("fergus", "sleep", a_night(5.5)))
+    ran(
+        wearable.record(
+            "fergus",
+            "activity",
+            {
+                "metadata": {
+                    "start_time": datetime.now(timezone.utc).isoformat(),
+                    "name": "Long run",
+                },
+                "distance_data": {"distance_meters": 21100},
+                "active_durations_data": {"activity_seconds": 7500},
+                "heart_rate_data": {"summary": {"avg_hr_bpm": 149}},
+            },
+        )
+    )
+
+    block = wearable.block("fergus")
+
+    assert "Fitbit" in block
+    assert "5h 30m asleep" in block and "sleep score 61" in block
+    assert "21.1 km" in block and "5:55 per km" in block
+    assert (
+        block
+        in RunnerState(
+            user_id="fergus", context="", commitments=[], wearable=block
+        ).as_prompt_block()
+    )
+
+
+def test_a_stale_night_is_not_read_out_as_news(wearable: Wearable) -> None:
+    old = a_night()
+    old["metadata"]["end_time"] = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    ran(wearable.record("fergus", "sleep", old))
+
+    assert wearable.block("fergus") == ""
+
+
+def test_a_resent_day_updates_rather_than_duplicates(wearable: Wearable) -> None:
+    now = datetime.now(timezone.utc)
+    partial = {
+        "metadata": {"end_time": (now - timedelta(hours=6)).isoformat()},
+        "distance_data": {"steps": 3000},
+    }
+    complete = {"metadata": {"end_time": now.isoformat()}, "distance_data": {"steps": 14000}}
+
+    ran(wearable.record("fergus", "daily", complete))
+    # Providers backfill out of order, and yesterday's half-day must not overwrite today.
+    ran(wearable.record("fergus", "daily", partial))
+
+    block = wearable.block("fergus")
+    assert "14,000 steps" in block
+    assert "3,000 steps" not in block
+
+
+def test_wearable_webhook_records_the_data_for_the_right_runner(
+    client: TestClient, wearable: Wearable, fake_memory: FakeMemory
+) -> None:
+    ran(wearable.link("device-1", "fergus", "Fitbit"))
+    body, headers = wearable_signed(
+        {"type": "sleep", "user": {"user_id": "device-1"}, "data": [a_night()]}
+    )
+
+    response = client.post("/webhooks/wearables", content=body, headers=headers)
+
+    assert response.json() == {"status": "recorded", "recorded": 1}
+    assert "asleep" in wearable.block("fergus")
+    assert fake_memory.events[0][0] == "fergus"
+
+
+def test_wearable_webhook_refuses_an_unsigned_payload(
+    client: TestClient, wearable: Wearable
+) -> None:
+    ran(wearable.link("device-1", "fergus", "Fitbit"))
+
+    response = client.post(
+        "/webhooks/wearables",
+        json={"type": "sleep", "user": {"user_id": "device-1"}, "data": [a_night()]},
+        headers={"x-webhook-signature": "t=1700000000,v1=deadbeef"},
+    )
+
+    assert response.status_code == 401
+    assert wearable.block("fergus") == ""
+
+
+def test_wearable_data_stays_dead_without_a_platform(client: TestClient) -> None:
+    identity = client.post("/api/register").json()
+    headers = {"authorization": f"Bearer {identity['token']}"}
+
+    status = client.get(f"/api/wearable?user_id={identity['user_id']}", headers=headers).json()
+    connect = client.post(f"/api/wearable/connect?user_id={identity['user_id']}", headers=headers)
+
+    assert status == {"available": False, "connected": False, "summary": ""}
+    assert connect.status_code == 503
+
+
+def test_one_runner_cannot_read_anothers_body(client: TestClient, wearable: Wearable) -> None:
+    ran(wearable.link("device-1", "fergus", "Fitbit"))
+    ran(wearable.record("fergus", "sleep", a_night()))
+
+    mine = client.post(
+        "/tools/body-metrics",
+        json={"runner_id": "fergus", "runner_sig": sign("fergus")},
+        headers=TOOL_HEADERS,
+    )
+    theirs = client.post(
+        "/tools/body-metrics",
+        json={"runner_id": "fergus", "runner_sig": sign("someone-else")},
+        headers=TOOL_HEADERS,
+    )
+
+    assert "asleep" in mine.json()["spoken_summary"]
+    assert theirs.status_code == 401
+
+
+def test_wearable_data_survives_a_redeploy() -> None:
+    async def scenario(database: Database) -> str:
+        writing = Wearable(database)
+        await writing.link("device-1", "fergus", "Fitbit")
+        await writing.record("fergus", "sleep", a_night(7.25))
+
+        restarted = Wearable(database)  # Render replaced the container
+        await restarted.load()
+        return restarted.block(restarted.runner_for("device-1"))
+
+    assert "7h 15m asleep" in on_postgres(scenario)
+
+
+def test_a_late_backfill_never_overwrites_the_newer_night() -> None:
+    now = datetime.now(timezone.utc)
+
+    async def scenario(database: Database) -> str:
+        store = Wearable(database)
+        await store.record(
+            "fergus",
+            "daily",
+            {"metadata": {"end_time": now.isoformat()}, "distance_data": {"steps": 14000}},
+        )
+        # A second process, holding the older payload, must not undo the newer row.
+        other = Wearable(database)
+        await other.record(
+            "fergus",
+            "daily",
+            {
+                "metadata": {"end_time": (now - timedelta(days=1)).isoformat()},
+                "distance_data": {"steps": 3000},
+            },
+        )
+        reread = Wearable(database)
+        await reread.load()
+        return reread.block("fergus")
+
+    block = on_postgres(scenario)
+    assert "14,000 steps" in block and "3,000 steps" not in block

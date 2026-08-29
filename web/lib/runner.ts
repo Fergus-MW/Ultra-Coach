@@ -117,7 +117,37 @@ export async function fetchProducts(who: Identity, need = ''): Promise<Product[]
   return (await response.json()).products;
 }
 
-export type Scenario = 'checkin' | 'races' | 'products' | 'excuse';
+export type Scenario = 'checkin' | 'races' | 'products' | 'excuse' | 'body';
+
+export type WearableStatus = { available: boolean; connected: boolean; summary: string };
+
+/** Whether the coach can see this runner's watch, and what it currently reads. */
+export async function wearableStatus(who: Identity): Promise<WearableStatus> {
+  const query = new URLSearchParams({ user_id: who.userId });
+  const response = await fetch(`${apiBase}/api/wearable?${query}`, {
+    headers: { authorization: `Bearer ${who.token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`wearable ${response.status}: ${await response.text()}`);
+  }
+  return response.json();
+}
+
+/**
+ * The connection page, opened in a new tab: the runner picks Fitbit and logs in there,
+ * so no provider credential reaches this app — and there is still nothing to type here.
+ */
+export async function connectWearable(who: Identity): Promise<string> {
+  const query = new URLSearchParams({ user_id: who.userId });
+  const response = await fetch(`${apiBase}/api/wearable/connect?${query}`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${who.token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`connect ${response.status}: ${await response.text()}`);
+  }
+  return (await response.json()).url;
+}
 
 /**
  * Ask the coach to ring now on a chosen subject. The coach still decides what it says

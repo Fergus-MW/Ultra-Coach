@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from .config import get_settings
+from .db import Database, database
 from .grok import opening_line
 from .memory import Memory
 from .ws import Ringer
@@ -35,53 +34,57 @@ class CallOutcome:
 
 
 class CallLog:
-    """When each runner was last rung, kept on disk so a restart is not a free call."""
+    """When each runner was last rung, in Postgres so a restart is not a free call.
 
-    def __init__(self, path: Path) -> None:
-        self._path = path
+    Kept in memory as well, because whether a runner is due is decided the moment they
+    open the app and again every quarter of an hour for everyone at once.
+    """
+
+    def __init__(self, store: Database | None = None) -> None:
+        self._db = store or database
         self._times: dict[str, datetime] = {}
-        self._load()
 
     def last_call(self, user_id: str) -> datetime | None:
         return self._times.get(user_id)
 
-    def record(self, user_id: str, moment: datetime) -> None:
+    async def record(self, user_id: str, moment: datetime) -> None:
         self._times[user_id] = moment
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.touch(mode=0o600, exist_ok=True)
-            # Who was coached and when is the runner's business, not every account's
-            # on the host, so the file stays owner-only whatever the umask says.
-            self._path.chmod(0o600)
-            self._path.write_text(
-                json.dumps({key: value.isoformat() for key, value in self._times.items()})
-            )
-        except OSError as error:  # a read-only disk must not stop the call
-            log.warning("could not persist call log: %s", error)
-
-    def _load(self) -> None:
-        try:
-            raw = json.loads(self._path.read_text())
-        except (OSError, ValueError):
+        if not self._db.ready:
             return
-        for user_id, stamp in raw.items():
-            try:
-                self._times[user_id] = datetime.fromisoformat(stamp)
-            except ValueError:
-                continue
+        try:
+            async with self._db.pool.acquire() as connection:
+                await connection.execute(
+                    """INSERT INTO calls (user_id, last_call) VALUES ($1, $2)
+                       ON CONFLICT (user_id) DO UPDATE SET last_call = EXCLUDED.last_call""",
+                    user_id,
+                    moment,
+                )
+        except Exception:  # the runner's phone is already ringing
+            log.exception("could not persist the call log for %s", user_id)
+
+    async def load(self) -> None:
+        if not self._db.ready:
+            return
+        async with self._db.pool.acquire() as connection:
+            rows = await connection.fetch("SELECT user_id, last_call FROM calls")
+        self._times = {row["user_id"]: row["last_call"] for row in rows}
 
 
 class Coach:
     """Ring runners who are online and overdue a reckoning."""
 
-    def __init__(self, memory: Memory, ringer: Ringer, log_path: Path | None = None) -> None:
+    def __init__(self, memory: Memory, ringer: Ringer, calls: CallLog | None = None) -> None:
         self._memory = memory
         self._ringer = ringer
-        self._calls = CallLog(log_path or Path(get_settings().state_file))
+        self._calls = calls or CallLog()
         self._scheduler = AsyncIOScheduler(timezone="UTC")
         self._admission = asyncio.Lock()
         self._ringing: set[str] = set()
         self._greetings: set[asyncio.Task] = set()
+
+    async def restore(self) -> None:
+        """Load who has already been called, so a redeploy is not a second call."""
+        await self._calls.load()
 
     def start(self) -> None:
         settings = get_settings()
@@ -169,7 +172,7 @@ class Coach:
             reason = state.commitments[0] if state.commitments else "routine check-in"
             delivered = await self._ringer.ring(user_id, line, reason)
             if delivered:
-                self._calls.record(user_id, datetime.now(timezone.utc))
+                await self._calls.record(user_id, datetime.now(timezone.utc))
                 # The runner's phone is already ringing. A history write that fails
                 # afterwards is a gap in the graph, not a call that did not happen.
                 try:

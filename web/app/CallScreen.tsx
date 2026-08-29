@@ -4,6 +4,7 @@ import { useConversation } from '@elevenlabs/react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
+  connectWearable,
   demoCall,
   demoProducts,
   forgetIdentity,
@@ -12,6 +13,8 @@ import {
   type Product,
   requestSession,
   type Scenario,
+  wearableStatus,
+  type WearableStatus,
   wsUrl,
 } from '@/lib/runner';
 import { Ringtone, unlockAudio } from '@/lib/ringtone';
@@ -33,6 +36,7 @@ export default function CallScreen({ onProducts }: Props) {
   const [audible, setAudible] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
+  const [wearable, setWearable] = useState<WearableStatus | null>(null);
 
   const socket = useRef<WebSocket | null>(null);
   const ringtone = useRef<Ringtone | null>(null);
@@ -124,6 +128,8 @@ export default function CallScreen({ onProducts }: Props) {
         .then((me) => {
           who.current = me;
           connect(me);
+          // Best effort: a coach that cannot read the watch is still a coach.
+          wearableStatus(me).then(setWearable, () => undefined);
         })
         .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
     }
@@ -204,6 +210,34 @@ export default function CallScreen({ onProducts }: Props) {
     [audible],
   );
 
+  useEffect(() => {
+    // The runner connects their device in another tab, so coming back here is the only
+    // signal that there is anything new to read.
+    const refresh = () => {
+      const me = who.current;
+      if (me && !document.hidden) wearableStatus(me).then(setWearable, () => undefined);
+    };
+    document.addEventListener('visibilitychange', refresh);
+    return () => document.removeEventListener('visibilitychange', refresh);
+  }, []);
+
+  const linkWatch = useCallback(async () => {
+    const me = who.current;
+    if (!me) return;
+    setError('');
+    setBusy('watch');
+    try {
+      // Opened before the await resolves would be a popup; opened after a tap that is
+      // still the user's own gesture chain, so the blocker leaves it alone.
+      const url = await connectWearable(me);
+      window.open(url, '_blank', 'noopener,noreferrer');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy('');
+    }
+  }, []);
+
   const pushKit = useCallback(async () => {
     const me = who.current;
     if (!me) return;
@@ -274,11 +308,38 @@ export default function CallScreen({ onProducts }: Props) {
               >
                 Call out my excuses
               </button>
+              <button
+                className={styles.demoButton}
+                disabled={busy !== '' || !wearable?.connected}
+                onClick={() => void rehearse('body')}
+              >
+                Read my watch back to me
+              </button>
               <button className={styles.demoButton} disabled={busy !== ''} onClick={() => void pushKit()}>
                 Show kit on screen
               </button>
             </div>
           </div>
+          {wearable?.available && (
+            <div className={styles.demo}>
+              <p className={styles.demoLabel}>
+                {wearable.connected
+                  ? 'Your watch is feeding the coach'
+                  : 'Give it your training data'}
+              </p>
+              {wearable.connected ? (
+                <p className={styles.wearable}>{wearable.summary || 'Waiting for the first sync.'}</p>
+              ) : (
+                <button
+                  className={styles.demoButton}
+                  disabled={busy !== ''}
+                  onClick={() => void linkWatch()}
+                >
+                  Connect my Fitbit
+                </button>
+              )}
+            </div>
+          )}
           {error && <p className={styles.error}>{error}</p>}
         </section>
       )}

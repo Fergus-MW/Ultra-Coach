@@ -18,14 +18,23 @@ class Settings(BaseSettings):
     zep_api_key: str = ""
     tavily_api_key: str = ""
 
+    wearables_url: str = ""
+    """Our own Open Wearables deployment. Unset means the coach has no device data."""
+    wearables_api_key: str = ""
+    wearables_webhook_secret: str = ""
+    """Signs the sync webhooks. Unset means wearable payloads are refused."""
+
     tool_secret: str = ""
     """Shared secret the ElevenLabs agent sends on server tool calls."""
 
     session_secret: str = ""
     """Key that signs device tokens. Unset means a per-process key: tokens die on restart."""
 
-    state_file: str = ".state/calls.json"
-    """Where call timestamps survive a restart."""
+    database_url: str = ""
+    """Postgres holding call history and wearable data. Unset means memory only."""
+
+    pwa_url: str = ""
+    """Where the runner is sent back to after connecting a device."""
 
     allowed_origins: str = ""
     checkin_hour_utc: int = 7

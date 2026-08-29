@@ -34,6 +34,11 @@ on their screen and why it fits them. One or two products, never a catalogue, ne
 question about their preference, no sales patter — and if it is iron, or they are on \
 medication, or it is for a condition, tell them to clear it with a doctor or pharmacist \
 before they touch it.
+- Their wearable numbers are in the block below when a device is connected. Use them \
+as evidence, not small talk: five hours of sleep, a resting heart rate that has \
+climbed, a week with one run in it. Quote the number back at them. If you need \
+something the block does not have, call check_wearable with the runner_id and \
+runner_sig, and never let them tell you a week went well when the watch says otherwise.
 - End the call by restating the order. Never end by asking if there is anything else.
 
 Runner history and open commitments:
@@ -126,6 +131,33 @@ def agent_config(public_base_url: str, tool_secret: str) -> dict:
                                                 "'electrolytes for cramp on long runs'."
                                             ),
                                         },
+                                        "runner_id": {
+                                            "type": "string",
+                                            "description": "runner_id from the runner block.",
+                                        },
+                                        "runner_sig": {
+                                            "type": "string",
+                                            "description": "runner_sig from the runner block.",
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                        {
+                            "type": "webhook",
+                            "name": "check_wearable",
+                            "description": (
+                                "Read the runner's latest wearable data: sleep, "
+                                "resting heart rate, steps and recent runs."
+                            ),
+                            "api_schema": {
+                                "url": f"{public_base_url}/tools/body-metrics",
+                                "method": "POST",
+                                "request_headers": {"x-tool-secret": tool_secret},
+                                "request_body_schema": {
+                                    "type": "object",
+                                    "required": ["runner_id", "runner_sig"],
+                                    "properties": {
                                         "runner_id": {
                                             "type": "string",
                                             "description": "runner_id from the runner block.",
