@@ -39,6 +39,9 @@ export function useCoachConversation() {
       setStatus('connected');
       lastSpoke.current = Date.now();
       startedAt.current = Date.now();
+      // Whether the agent sends speech scores is a property of the session, so a
+      // score from the last one must not decide how this one detects the runner.
+      vad.current = { score: 0, at: 0 };
       // startSession returns before the WebRTC connection exists, so the timers
       // can only be armed here, once there is a session to talk to.
       clearTimers();
