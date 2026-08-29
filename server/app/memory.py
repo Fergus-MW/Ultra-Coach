@@ -12,6 +12,7 @@ from zep_cloud import EntityEdge, Message
 from zep_cloud.client import AsyncZep
 from zep_cloud.errors import BadRequestError, NotFoundError
 
+from .clock import ago, clocks
 from .config import get_settings
 from .wearables import wearable
 
@@ -35,10 +36,15 @@ class RunnerState:
     wearable: str = ""
 
     def as_prompt_block(self) -> str:
+        # Read on every turn, not stored on the state: a cached state that is a few
+        # minutes old must still say what the time is now.
+        now = clocks.now_line(self.user_id)
         commitments = "\n".join(f"- {item}" for item in self.commitments)
-        parts = [self.wearable.strip(), self.context.strip(), commitments.strip()]
-        block = "\n\n".join(part for part in parts if part)
-        return block or "No history yet. This is the first contact with this runner."
+        parts = [now, self.wearable.strip(), self.context.strip(), commitments.strip()]
+        history = "\n\n".join(part for part in parts[1:] if part)
+        if not history:
+            return f"{now}\n\nNo history yet. This is the first contact with this runner."
+        return f"{now}\n\n{history}"
 
 
 class Memory:
@@ -199,4 +205,16 @@ def _format_edge(edge: EntityEdge) -> str:
     """Expired facts are dropped: the coach must not chase a settled commitment."""
     if edge.expired_at:
         return ""
-    return edge.fact or ""
+    fact = edge.fact or ""
+    # A promise made this morning and one made a month ago are not the same promise.
+    when = ago(_moment(edge.valid_at or edge.created_at))
+    return f"{fact} ({when})" if fact and when else fact
+
+
+def _moment(stamp: str | None) -> datetime | None:
+    if not stamp:
+        return None
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None

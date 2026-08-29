@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from time import monotonic
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -16,6 +17,7 @@ from fastapi.testclient import TestClient
 from app import healf, llm, main
 from app import memory as memory_module
 from app.auth import sign
+from app.clock import clocks
 from app.db import Database
 from app.healf import Catalogue, _from_page, _from_sitemap
 from app.memory import RunnerState, _format_edge
@@ -412,8 +414,39 @@ def test_resolved_commitments_are_dropped() -> None:
     class Edge:
         fact = "Signed up for the Lakeland 50"
         expired_at = "2026-01-01T00:00:00Z"
+        valid_at = None
+        created_at = None
 
     assert _format_edge(Edge()) == ""
+
+
+def test_a_commitment_carries_how_long_ago_it_was_made() -> None:
+    class Edge:
+        fact = "Promised a 20 mile long run on Sunday"
+        expired_at = None
+        valid_at = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+        created_at = None
+
+    # A promise made three days ago is a different thing from one made this morning.
+    assert _format_edge(Edge()) == "Promised a 20 mile long run on Sunday (3 days ago)"
+
+
+def test_the_prompt_opens_with_the_runners_own_clock() -> None:
+    ran(clocks.remember("sydneysider", "Australia/Sydney"))
+    state = RunnerState(user_id="sydneysider", context="", commitments=[])
+
+    first = state.as_prompt_block().splitlines()[0]
+
+    here = datetime.now(ZoneInfo("Australia/Sydney"))
+    assert here.strftime("%A %d %B %Y") in first
+    assert "local time" in first
+
+
+def test_a_zone_the_device_invents_is_not_believed() -> None:
+    ran(clocks.remember("martian", "Mars/Olympus_Mons"))
+
+    # Better the server's clock than a crash mid-call on a name nobody can resolve.
+    assert clocks.zone_of("martian") == ZoneInfo("UTC")
 
 
 def test_a_failed_mint_does_not_burn_the_throttle(client: TestClient, monkeypatch) -> None:

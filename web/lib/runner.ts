@@ -194,6 +194,14 @@ export async function demoProducts(who: Identity, need: string): Promise<void> {
   }
 }
 
+function deviceZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  } catch {
+    return '';
+  }
+}
+
 export async function requestSession(who: Identity): Promise<SessionGrant> {
   const response = await fetch(`${apiBase}/api/session`, {
     method: 'POST',
@@ -201,7 +209,9 @@ export async function requestSession(who: Identity): Promise<SessionGrant> {
       'content-type': 'application/json',
       authorization: `Bearer ${who.token}`,
     },
-    body: JSON.stringify({ user_id: who.userId }),
+    // The coach sets sessions for "tomorrow at five", so it needs the runner's clock,
+    // not the server's.
+    body: JSON.stringify({ user_id: who.userId, timezone: deviceZone() }),
   });
   if (!response.ok) {
     throw new Error(`session ${response.status}: ${await response.text()}`);
