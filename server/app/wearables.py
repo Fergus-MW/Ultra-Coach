@@ -168,12 +168,12 @@ class Wearable:
         if not user_id:
             return
         provider = get_settings().wearables_provider
-        try:
-            await self._call("DELETE", f"/api/v1/users/{user_id}/connections/{provider}")
-        except Exception:
-            # Consent revoked from Google's own settings is already gone from the
-            # platform; the runner still asked us to forget it here.
-            log.warning("could not revoke %s for %s on the platform", provider, runner_id)
+        # Consent already withdrawn from Google's own settings is a disconnection that
+        # has happened; a platform that is down or refusing is not, and saying otherwise
+        # would leave the runner's data flowing behind a screen that says it stopped.
+        await self._call(
+            "DELETE", f"/api/v1/users/{user_id}/connections/{provider}", absent_ok=True
+        )
         snapshot = self._snapshot(runner_id)
         snapshot.connected = False
         snapshot.readings.clear()
@@ -339,10 +339,17 @@ class Wearable:
                 at=row["measured_at"], provider=row["provider"], text=row["summary"]
             )
 
-    async def _call(self, method: str, path: str, **kwargs: Any) -> dict:
+    async def _call(self, method: str, path: str, absent_ok: bool = False, **kwargs: Any) -> dict:
         base = get_settings().wearables_url.rstrip("/")
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.request(method, f"{base}{path}", headers=_headers(), **kwargs)
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.request(
+                    method, f"{base}{path}", headers=_headers(), **kwargs
+                )
+        except httpx.HTTPError as error:
+            raise WearableError(f"the wearables platform is unreachable: {error}") from error
+        if response.status_code == 404 and absent_ok:
+            return {}
         if response.status_code >= 400:
             raise WearableError(f"the wearables platform refused: {response.text[:200]}")
         if not response.content:
