@@ -33,6 +33,9 @@ REACH_BACK = 90
 # one costs a row and a line in the graph.
 KEEP_EACH = 8
 
+# Readings read back per runner at startup: no more than a call could ever quote.
+KEPT_PER_RUNNER = 12
+
 
 class WearableError(RuntimeError):
     pass
@@ -408,10 +411,18 @@ class Wearable:
             links = await connection.fetch(
                 "SELECT external_user_id, runner_id, provider, confirmed FROM wearable_links"
             )
+            # The same reach as a pull, not the week: a runner whose watch last synced a
+            # month ago would otherwise come back from a redeploy with nothing at all.
+            # Bounded per runner, since only the newest lines are ever read out.
             readings = await connection.fetch(
-                """SELECT runner_id, kind, measured_at, provider, summary
-                   FROM wearable_readings WHERE measured_at >= $1""",
-                datetime.now(timezone.utc) - FRESH_FOR,
+                """SELECT runner_id, kind, measured_at, provider, summary FROM (
+                       SELECT *, row_number() OVER (
+                           PARTITION BY runner_id ORDER BY measured_at DESC
+                       ) AS rank
+                       FROM wearable_readings WHERE measured_at >= $1
+                   ) held WHERE rank <= $2""",
+                datetime.now(timezone.utc) - timedelta(days=REACH_BACK),
+                KEPT_PER_RUNNER,
             )
         self._links = {row["external_user_id"]: row["runner_id"] for row in links}
         for row in links:

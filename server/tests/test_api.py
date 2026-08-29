@@ -1415,6 +1415,23 @@ def test_wearable_data_survives_a_redeploy() -> None:
     assert "7h 15m asleep" in on_postgres(scenario)
 
 
+def test_a_month_old_night_survives_a_redeploy_too() -> None:
+    # Nothing is pulled until the runner is next looked at, so a restart that dropped
+    # stale readings would leave a proactive call with no watch context at all.
+    async def scenario(database: Database) -> str:
+        writing = Wearable(database)
+        await writing.link("user-1", "fergus", "fitbit", confirmed=True)
+        old = a_night(7.25)
+        old["end_time"] = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        await writing.record("fergus", "sleep", old)
+
+        restarted = Wearable(database)
+        await restarted.load()
+        return restarted.block("fergus")
+
+    assert "7h 15m asleep" in on_postgres(scenario)
+
+
 def test_a_registration_allowance_is_shared_by_every_worker(monkeypatch) -> None:
     async def scenario(store: Database) -> list[bool]:
         monkeypatch.setattr(main, "database", store)
