@@ -11,7 +11,11 @@ type Tile = { label: string; value: string; note: string };
 export default function Watch({ panel }: { panel: WearablePanel }) {
   const tiles = toTiles(panel);
   if (!tiles.length) {
-    return <p className={styles.empty}>Waiting for the first sync.</p>;
+    return (
+      <p className={styles.empty}>
+        Connected. Pulling your history off the watch — it lands in a minute or two.
+      </p>
+    );
   }
 
   return (

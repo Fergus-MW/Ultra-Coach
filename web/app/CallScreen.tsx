@@ -226,6 +226,30 @@ export default function CallScreen({ onProducts }: Props) {
     return () => document.removeEventListener('visibilitychange', refresh);
   }, []);
 
+  const panel = wearable?.panel;
+  // The provider's name rides along with the readings, so its presence proves nothing:
+  // only an actual daily, sleep or activity record means the watch has spoken.
+  const awaitingSync = Boolean(
+    wearable?.connected && !panel?.daily && !panel?.sleep && !panel?.activity,
+  );
+  useEffect(() => {
+    // The platform pulls from Google in the background after consent, so the first
+    // numbers arrive some seconds after the watch says it is connected. Poll until they
+    // do rather than leaving the runner to guess when to come back.
+    if (!awaitingSync) return;
+    let live = true;
+    // Each ask waits for the last answer, so a slow platform gathers no queue behind it.
+    let timer = window.setTimeout(async function again() {
+      const me = who.current;
+      if (me && !document.hidden) await wearableStatus(me).then(setWearable, () => undefined);
+      if (live) timer = window.setTimeout(again, 15000);
+    }, 15000);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [awaitingSync]);
+
   const linkWatch = useCallback(async () => {
     const me = who.current;
     if (!me) return;
@@ -342,9 +366,7 @@ export default function CallScreen({ onProducts }: Props) {
           {wearable?.available && (
             <div className={styles.demo}>
               <p className={styles.demoLabel}>
-                {wearable.connected
-                  ? 'Your watch is feeding the coach'
-                  : 'Give it your training data'}
+                {wearable.connected ? 'Your watch is feeding the coach' : 'Give it your training data'}
               </p>
               {wearable.connected ? (
                 <>
@@ -358,11 +380,7 @@ export default function CallScreen({ onProducts }: Props) {
                   </button>
                 </>
               ) : (
-                <button
-                  className={styles.demoButton}
-                  disabled={busy !== ''}
-                  onClick={() => void linkWatch()}
-                >
+                <button className={styles.demoButton} disabled={busy !== ''} onClick={() => void linkWatch()}>
                   Connect my watch
                 </button>
               )}
