@@ -258,12 +258,12 @@ async def proactive_ring(user_id: str, body: CallRequest | None = None) -> dict:
 DEMO_SCENARIOS = {
     "checkin": "",
     "races": (
-        "Open by demanding they name a race they will enter, and use your race search "
-        "tool this call to put real events in front of them."
+        "Use your race search tool this call and tell them which specific event they are "
+        "entering, with the date and the entry deadline. Do not ask them to pick one."
     ),
     "products": (
-        "Open on how they are fuelling and recovering, and once they answer use your "
-        "product tool so the kit they need appears on their screen."
+        "Open on how they are fuelling and recovering, then use your product tool and "
+        "tell them what you have put on their screen and that they are taking it."
     ),
     "excuse": (
         "Open by accusing them of skipping the session they promised, and refuse the "
