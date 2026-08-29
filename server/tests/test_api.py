@@ -946,7 +946,7 @@ def test_a_resent_day_updates_rather_than_duplicates(wearable: Wearable) -> None
     assert "3,000 steps" not in block
 
 
-def test_connecting_creates_the_runner_once_and_asks_for_fitbit(
+def test_connecting_creates_the_runner_once_and_asks_for_consent(
     client: TestClient, wearable: Wearable, monkeypatch
 ) -> None:
     configured = main.get_settings()
@@ -958,7 +958,7 @@ def test_connecting_creates_the_runner_once_and_asks_for_fitbit(
         wearable,
         {
             "/api/v1/users": {"id": "0d2f-user"},
-            "/api/v1/oauth/fitbit/authorize": {"authorization_url": "https://fitbit.test/consent"},
+            "/api/v1/oauth/google/authorize": {"authorization_url": "https://google.test/consent"},
         },
     )
     identity = client.post("/api/register").json()
@@ -968,7 +968,7 @@ def test_connecting_creates_the_runner_once_and_asks_for_fitbit(
     first = client.post(f"/api/wearable/connect?user_id={runner}", headers=headers)
     second = client.post(f"/api/wearable/connect?user_id={runner}", headers=headers)
 
-    assert first.json() == {"url": "https://fitbit.test/consent"}
+    assert first.json() == {"url": "https://google.test/consent"}
     assert second.json() == first.json()
     # The runner is minted once: a second tap must reuse them, not fork their history.
     assert [path for method, path in seen if method == "POST"] == ["/api/v1/users"]
