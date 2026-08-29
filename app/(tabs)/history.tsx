@@ -39,7 +39,10 @@ export default function HistoryScreen() {
                   <Text style={styles.stat}>{(run.metrics.distanceM / 1000).toFixed(2)} km</Text>
                   <Text style={styles.stat}>{formatDuration(run.metrics.elapsedMs)}</Text>
                   <Text style={styles.stat}>{formatPace(run.metrics.averagePaceSecPerKm)}/km</Text>
-                  <Text style={styles.stat}>{run.metrics.heartRateAvgBpm ?? '--'} bpm</Text>
+                  <Text style={styles.stat}>
+                    {run.metrics.heartRateAvgBpm === null ? '--' : Math.round(run.metrics.heartRateAvgBpm)}{' '}
+                    bpm
+                  </Text>
                 </View>
                 <View style={styles.bar}>
                   {ZONES.map((zone) => {
