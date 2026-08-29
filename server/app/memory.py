@@ -64,7 +64,12 @@ class Memory:
         try:
             await self._client.thread.create(thread_id=thread_id, user_id=user_id)
         except BadRequestError:
-            pass  # thread already exists: a webhook retry
+            # The thread exists, so this is a webhook retry. Re-adding the turns would
+            # double the call in the runner's history, unless the first attempt died
+            # between creating the thread and filling it.
+            if await self._has_messages(thread_id):
+                log.info("ignoring duplicate transcript for %s", conversation_id)
+                return
 
         await self._client.thread.add_messages(
             thread_id,
@@ -111,8 +116,25 @@ class Memory:
         return RunnerState(user_id=user_id, context=context, commitments=commitments)
 
     async def list_runners(self) -> list[str]:
-        response = await self._client.user.list_ordered(page_size=100)
-        return [user.user_id for user in response.users or [] if user.user_id]
+        """Every runner, not just the first page: the sweep must not silently drop anyone."""
+        page_size = 100
+        runners: list[str] = []
+        for page_number in range(1, 1000):
+            response = await self._client.user.list_ordered(
+                page_size=page_size, page_number=page_number
+            )
+            users = response.users or []
+            runners.extend(user.user_id for user in users if user.user_id)
+            if len(users) < page_size:
+                break
+        return runners
+
+    async def _has_messages(self, thread_id: str) -> bool:
+        try:
+            response = await self._client.thread.get(thread_id)
+        except NotFoundError:
+            return False
+        return bool(response.messages)
 
 
 def _latest_thread_id(threads: list) -> str | None:
@@ -123,8 +145,7 @@ def _latest_thread_id(threads: list) -> str | None:
 
 
 def _format_edge(edge: EntityEdge) -> str:
-    fact = getattr(edge, "fact", None)
-    if not fact:
+    """Expired facts are dropped: the coach must not chase a settled commitment."""
+    if edge.expired_at:
         return ""
-    expired = getattr(edge, "expired_at", None)
-    return f"{fact} (no longer true)" if expired else fact
+    return edge.fact or ""

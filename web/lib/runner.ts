@@ -1,13 +1,26 @@
-const STORAGE_KEY = "ultracoach.runner_id";
+const ID_KEY = "ultracoach.runner_id";
+const TOKEN_KEY = "ultracoach.runner_token";
 
-/** A device-scoped identity, so the runner never has to type who they are. */
-export function runnerId(): string {
-  const existing = window.localStorage.getItem(STORAGE_KEY);
-  if (existing) return existing;
+export type Identity = { userId: string; token: string };
 
-  const created = `runner_${crypto.randomUUID()}`;
-  window.localStorage.setItem(STORAGE_KEY, created);
-  return created;
+/**
+ * A device-scoped identity, so the runner never has to type who they are. The id is
+ * minted by the backend together with a token; every later request proves the device
+ * owns that id, so one browser cannot listen in on another runner's calls.
+ */
+export async function identity(): Promise<Identity> {
+  const userId = window.localStorage.getItem(ID_KEY);
+  const token = window.localStorage.getItem(TOKEN_KEY);
+  if (userId && token) return { userId, token };
+
+  const response = await fetch(`${apiBase}/api/register`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(`register ${response.status}: ${await response.text()}`);
+  }
+  const created = await response.json();
+  window.localStorage.setItem(ID_KEY, created.user_id);
+  window.localStorage.setItem(TOKEN_KEY, created.token);
+  return { userId: created.user_id, token: created.token };
 }
 
 export const apiBase = (
@@ -27,11 +40,14 @@ export type SessionGrant = {
   runner_state: string;
 };
 
-export async function requestSession(userId: string): Promise<SessionGrant> {
+export async function requestSession(who: Identity): Promise<SessionGrant> {
   const response = await fetch(`${apiBase}/api/session`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ user_id: userId }),
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${who.token}`,
+    },
+    body: JSON.stringify({ user_id: who.userId }),
   });
   if (!response.ok) {
     throw new Error(`session ${response.status}: ${await response.text()}`);

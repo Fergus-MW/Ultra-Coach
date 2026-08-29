@@ -19,7 +19,13 @@ class Settings(BaseSettings):
     tool_secret: str = ""
     """Shared secret the ElevenLabs agent sends on server tool calls."""
 
-    allowed_origins: str = "*"
+    session_secret: str = ""
+    """Key that signs device tokens. Unset means a per-process key: tokens die on restart."""
+
+    state_file: str = ".state/calls.json"
+    """Where call timestamps survive a restart."""
+
+    allowed_origins: str = ""
     checkin_hour_utc: int = 7
     """Hour of day the proactive scheduler evaluates every runner."""
 
@@ -27,6 +33,7 @@ class Settings(BaseSettings):
 
     @property
     def origins(self) -> list[str]:
+        """No configured origins means same-origin only, never `*`."""
         return [origin.strip() for origin in self.allowed_origins.split(",") if origin.strip()]
 
 

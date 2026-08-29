@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from hmac import compare_digest
 
 import httpx
 from fastapi import (
@@ -19,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from .auth import bearer, issue_identity, verify, verify_webhook
 from .config import Settings, get_settings
 from .llm import chat_completion
 from .memory import Memory
@@ -51,9 +53,24 @@ app.add_middleware(
 
 
 def require_tool_secret(x_tool_secret: str = Header(default="")) -> None:
+    """Fail closed: an unset TOOL_SECRET locks the tools rather than opening them."""
     settings = get_settings()
-    if settings.tool_secret and x_tool_secret != settings.tool_secret:
+    if not settings.tool_secret:
+        raise HTTPException(status_code=503, detail="TOOL_SECRET is not configured")
+    if not compare_digest(x_tool_secret, settings.tool_secret):
         raise HTTPException(status_code=401, detail="bad tool secret")
+
+
+def require_runner(user_id: str, authorization: str = Header(default="")) -> str:
+    """The device proves it owns this runner id with the token it was issued."""
+    if not verify(user_id, bearer(authorization)):
+        raise HTTPException(status_code=401, detail="unknown runner token")
+    return user_id
+
+
+class IdentityResponse(BaseModel):
+    user_id: str
+    token: str
 
 
 class SessionRequest(BaseModel):
@@ -81,11 +98,22 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+@app.post("/api/register", response_model=IdentityResponse)
+async def register() -> IdentityResponse:
+    """A device claims an identity once. No login, because there is nothing to type."""
+    user_id, token = issue_identity()
+    await memory.ensure_user(user_id)
+    return IdentityResponse(user_id=user_id, token=token)
+
+
 @app.post("/api/session", response_model=SessionResponse)
 async def create_session(
-    body: SessionRequest, settings: Settings = Depends(get_settings)
+    body: SessionRequest,
+    authorization: str = Header(default=""),
+    settings: Settings = Depends(get_settings),
 ) -> SessionResponse:
     """Everything the browser needs to open a call, minus any credential."""
+    require_runner(body.user_id, authorization)
     if not settings.elevenlabs_agent_id:
         raise HTTPException(status_code=503, detail="no agent configured")
 
@@ -97,8 +125,9 @@ async def create_session(
     )
 
 
-@app.post("/api/proactive-ring/{user_id}")
+@app.post("/api/proactive-ring/{user_id}", dependencies=[Depends(require_tool_secret)])
 async def proactive_ring(user_id: str, body: CallRequest | None = None) -> dict:
+    """Operator-only: the scheduler is the normal way a call happens."""
     outcome = await coach.call(user_id, force=bool(body and body.force))
     return {
         "rang": outcome.rang,
@@ -109,8 +138,23 @@ async def proactive_ring(user_id: str, body: CallRequest | None = None) -> dict:
 
 
 @app.post("/webhooks/elevenlabs-transcript")
-async def elevenlabs_transcript(request: Request, background: BackgroundTasks) -> dict:
-    """Post-call webhook: the whole conversation goes into the knowledge graph."""
+async def elevenlabs_transcript(
+    request: Request,
+    background: BackgroundTasks,
+    elevenlabs_signature: str = Header(default=""),
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    """Post-call webhook: the whole conversation goes into the knowledge graph.
+
+    Unsigned payloads are refused — anyone who could post here could write a runner's
+    history, and that history drives every later call.
+    """
+    raw = await request.body()
+    if not settings.elevenlabs_webhook_secret:
+        raise HTTPException(status_code=503, detail="ELEVENLABS_WEBHOOK_SECRET is not configured")
+    if not verify_webhook(settings.elevenlabs_webhook_secret, elevenlabs_signature, raw):
+        raise HTTPException(status_code=401, detail="bad webhook signature")
+
     payload = await request.json()
     data = payload.get("data", payload)
     conversation_id = data.get("conversation_id", "unknown")
@@ -155,7 +199,11 @@ async def llm_proxy(request: Request):
 
 
 @app.websocket("/ws/{user_id}")
-async def runner_socket(websocket: WebSocket, user_id: str) -> None:
+async def runner_socket(websocket: WebSocket, user_id: str, token: str = "") -> None:
+    if not verify(user_id, token):
+        await websocket.close(code=1008)
+        return
+
     await ringer.connect(user_id, websocket)
     await memory.ensure_user(user_id)
     try:

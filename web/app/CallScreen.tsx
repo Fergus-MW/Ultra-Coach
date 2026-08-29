@@ -3,7 +3,7 @@
 import { useConversation } from "@elevenlabs/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { requestSession, runnerId, wsUrl } from "@/lib/runner";
+import { identity, type Identity, requestSession, wsUrl } from "@/lib/runner";
 import { Ringtone } from "@/lib/ringtone";
 import styles from "./call.module.css";
 
@@ -19,7 +19,7 @@ export default function CallScreen() {
 
   const socket = useRef<WebSocket | null>(null);
   const ringtone = useRef<Ringtone | null>(null);
-  const userId = useRef<string>("");
+  const who = useRef<Identity | null>(null);
 
   const conversation = useConversation({
     onConnect: () => setScreen("live"),
@@ -36,18 +36,20 @@ export default function CallScreen() {
   }, []);
 
   useEffect(() => {
-    userId.current = runnerId();
     let closed = false;
     let retry: number | undefined;
 
-    const connect = () => {
-      const next = new WebSocket(wsUrl(`/ws/${userId.current}`));
+    const connect = (me: Identity) => {
+      if (closed) return;
+      const next = new WebSocket(
+        wsUrl(`/ws/${me.userId}?token=${encodeURIComponent(me.token)}`),
+      );
       socket.current = next;
 
       next.onopen = () => setOnline(true);
       next.onclose = () => {
         setOnline(false);
-        if (!closed) retry = window.setTimeout(connect, 3000);
+        if (!closed) retry = window.setTimeout(() => connect(me), 3000);
       };
       next.onmessage = (event) => {
         const payload = JSON.parse(event.data);
@@ -60,7 +62,13 @@ export default function CallScreen() {
       };
     };
 
-    connect();
+    identity()
+      .then((me) => {
+        who.current = me;
+        connect(me);
+      })
+      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+
     return () => {
       closed = true;
       window.clearTimeout(retry);
@@ -76,12 +84,15 @@ export default function CallScreen() {
     socket.current?.send(JSON.stringify({ type: "call_answered" }));
 
     try {
-      const grant = await requestSession(userId.current);
+      const me = who.current;
+      if (!me) throw new Error("no runner identity yet");
+
+      const grant = await requestSession(me);
       await navigator.mediaDevices.getUserMedia({ audio: true });
       conversation.startSession({
         conversationToken: grant.conversation_token,
         connectionType: "webrtc",
-        dynamicVariables: { runner_id: userId.current },
+        dynamicVariables: { runner_id: me.userId },
         overrides: {
           agent: {
             prompt: { prompt: grant.runner_state },

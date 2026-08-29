@@ -19,15 +19,25 @@ The Android app in the repo root is a separate product and is untouched by this 
 
 ## Routes
 
-| Route | Used by |
-| --- | --- |
-| `GET /health` | Render health check |
-| `POST /api/session` | PWA, before answering a call |
-| `POST /api/proactive-ring/{user_id}` | Manual trigger of a call |
-| `POST /webhooks/elevenlabs-transcript` | ElevenLabs post-call webhook |
-| `POST /tools/search-races` | ElevenLabs server tool `search_ultra_events` |
-| `POST /llm/chat/completions` | ElevenLabs custom LLM |
-| `WS /ws/{user_id}` | PWA ring channel and call outcomes |
+| Route | Used by | Auth |
+| --- | --- | --- |
+| `GET /health` | Render health check | none |
+| `POST /api/register` | PWA, once per device | none |
+| `POST /api/session` | PWA, before answering a call | device token |
+| `POST /api/proactive-ring/{user_id}` | Manual trigger of a call | `x-tool-secret` |
+| `POST /webhooks/elevenlabs-transcript` | ElevenLabs post-call webhook | `ElevenLabs-Signature` |
+| `POST /tools/search-races` | ElevenLabs server tool `search_ultra_events` | `x-tool-secret` |
+| `POST /llm/chat/completions` | ElevenLabs custom LLM | `x-tool-secret` |
+| `WS /ws/{user_id}?token=` | PWA ring channel and call outcomes | device token |
+
+## Identity without a login
+
+The PWA has no text inputs, so there is nothing to type a password into. A device calls
+`/api/register` once and stores the returned runner id and HMAC token in `localStorage`;
+every session request and WebSocket carries that token, so a browser can only hear its own
+calls. `SESSION_SECRET` signs the tokens — leave it unset and every restart logs devices out.
+Endpoints that need `TOOL_SECRET` or `ELEVENLABS_WEBHOOK_SECRET` return 503 when the secret
+is missing rather than running unauthenticated.
 
 ## Local run
 

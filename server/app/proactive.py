@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -28,13 +30,46 @@ class CallOutcome:
     delivered: int = 0
 
 
+class CallLog:
+    """When each runner was last rung, kept on disk so a restart is not a free call."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._times: dict[str, datetime] = {}
+        self._load()
+
+    def last_call(self, user_id: str) -> datetime | None:
+        return self._times.get(user_id)
+
+    def record(self, user_id: str, moment: datetime) -> None:
+        self._times[user_id] = moment
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._path.write_text(
+                json.dumps({key: value.isoformat() for key, value in self._times.items()})
+            )
+        except OSError as error:  # a read-only disk must not stop the call
+            log.warning("could not persist call log: %s", error)
+
+    def _load(self) -> None:
+        try:
+            raw = json.loads(self._path.read_text())
+        except (OSError, ValueError):
+            return
+        for user_id, stamp in raw.items():
+            try:
+                self._times[user_id] = datetime.fromisoformat(stamp)
+            except ValueError:
+                continue
+
+
 class Coach:
     """Ring runners who are online and overdue a reckoning."""
 
-    def __init__(self, memory: Memory, ringer: Ringer) -> None:
+    def __init__(self, memory: Memory, ringer: Ringer, log_path: Path | None = None) -> None:
         self._memory = memory
         self._ringer = ringer
-        self._last_call: dict[str, datetime] = {}
+        self._calls = CallLog(log_path or Path(get_settings().state_file))
         self._scheduler = AsyncIOScheduler(timezone="UTC")
 
     def start(self) -> None:
@@ -63,11 +98,11 @@ class Coach:
         return [await self.call(user_id) for user_id in await self._memory.list_runners()]
 
     async def sweep_online(self) -> list[CallOutcome]:
-        """A missed daily check-in is chased as soon as the runner opens the app."""
+        """Chase a check-in the runner was already due, as soon as they open the app."""
         runners = [
             user_id
             for user_id in await self._memory.list_runners()
-            if self._ringer.is_online(user_id)
+            if self._ringer.is_online(user_id) and self._checkin_missed(user_id)
         ]
         return [await self.call(user_id) for user_id in runners]
 
@@ -83,14 +118,28 @@ class Coach:
         reason = state.commitments[0] if state.commitments else "routine check-in"
         delivered = await self._ringer.ring(user_id, line, reason)
         if delivered:
-            self._last_call[user_id] = datetime.now(timezone.utc)
+            self._calls.record(user_id, datetime.now(timezone.utc))
             await self._memory.record_event(
                 user_id, "proactive_call_placed", {"reason": reason, "opening_line": line}
             )
         return CallOutcome(user_id, bool(delivered), reason, line, delivered)
 
     def _called_recently(self, user_id: str) -> bool:
-        last = self._last_call.get(user_id)
+        last = self._calls.last_call(user_id)
         if last is None:
             return False
         return datetime.now(timezone.utc) - last < timedelta(hours=MIN_HOURS_BETWEEN_CALLS)
+
+    def _checkin_missed(self, user_id: str) -> bool:
+        """True once today's check-in hour has passed with no call since it came round."""
+        now = datetime.now(timezone.utc)
+        due = datetime.combine(
+            date(now.year, now.month, now.day),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        ) + timedelta(hours=get_settings().checkin_hour_utc)
+        if now < due:
+            return False
+
+        last = self._calls.last_call(user_id)
+        return last is None or last < due
