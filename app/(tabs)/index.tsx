@@ -1,4 +1,5 @@
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { useCallback, useMemo, useState } from 'react';
 import { ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { allStaticPhrases } from '../../src/coach/cues';
 import { sessionDateIso, sessionForDate, upcomingSessions } from '../../src/coach/plan';
@@ -18,8 +19,20 @@ export default function TodayScreen() {
   const today = todayIso();
   const session = plan ? sessionForDate(plan, settings.planStartDateIso, today) : null;
   const next = plan ? upcomingSessions(plan, settings.planStartDateIso, today, 3) : [];
-  const voice = voiceConfigFrom(settings, apiKey);
-  const cache = voice ? cacheSummary(allStaticPhrases(), voice) : { cached: 0, total: allStaticPhrases().length };
+  const voice = useMemo(() => voiceConfigFrom(settings, apiKey), [settings, apiKey]);
+  const [cache, setCache] = useState(() => ({ cached: 0, total: allStaticPhrases().length }));
+
+  // The cue cache is on disk, so it changes behind this screen's back whenever
+  // Settings warms or clears it; re-read it every time the tab is focused.
+  useFocusEffect(
+    useCallback(() => {
+      setCache(
+        voice
+          ? cacheSummary(allStaticPhrases(), voice)
+          : { cached: 0, total: allStaticPhrases().length },
+      );
+    }, [voice]),
+  );
 
   return (
     <Screen>

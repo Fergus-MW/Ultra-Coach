@@ -3,7 +3,7 @@ import { AudioModule } from 'expo-audio';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { runSession } from '../run/session';
 import { useSettings } from '../store/settings';
-import { getSignedAgentUrl } from './elevenlabs';
+import { getConversationToken } from './elevenlabs';
 
 /** Biometrics go in as contextual updates, never by rewriting instructions. */
 const CONTEXT_INTERVAL_MS = 30_000;
@@ -21,12 +21,20 @@ export function useCoachConversation() {
   const contextTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const silenceTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const clearTimers = useCallback(() => {
+    if (contextTimer.current) clearInterval(contextTimer.current);
+    if (silenceTimer.current) clearInterval(silenceTimer.current);
+    contextTimer.current = null;
+    silenceTimer.current = null;
+  }, []);
+
   const conversation = useConversation({
     onConnect: () => {
       setStatus('connected');
       lastActivity.current = Date.now();
     },
     onDisconnect: () => {
+      clearTimers();
       setStatus('idle');
       runSession.setVoiceSuppressed(false);
     },
@@ -34,18 +42,12 @@ export function useCoachConversation() {
       lastActivity.current = Date.now();
     },
     onError: (message: string) => {
+      clearTimers();
       setError(message);
       setStatus('error');
       runSession.setVoiceSuppressed(false);
     },
   });
-
-  const clearTimers = useCallback(() => {
-    if (contextTimer.current) clearInterval(contextTimer.current);
-    if (silenceTimer.current) clearInterval(silenceTimer.current);
-    contextTimer.current = null;
-    silenceTimer.current = null;
-  }, []);
 
   const stop = useCallback(() => {
     clearTimers();
@@ -70,12 +72,15 @@ export function useCoachConversation() {
       // must not talk over the conversation.
       runSession.setVoiceSuppressed(true);
 
+      // React Native only supports WebRTC: a private agent needs a conversation
+      // token, a public one connects on its id alone.
       const config = apiKey
-        ? { signedUrl: await getSignedAgentUrl(apiKey, settings.agentId) }
+        ? { conversationToken: await getConversationToken(apiKey, settings.agentId) }
         : { agentId: settings.agentId };
 
-      conversation.startSession({
+      await conversation.startSession({
         ...config,
+        connectionType: 'webrtc' as const,
         dynamicVariables: {
           run_context: runSession.contextSummary(),
         },
@@ -89,11 +94,12 @@ export function useCoachConversation() {
         if (Date.now() - lastActivity.current > SILENCE_TIMEOUT_MS) stop();
       }, 5000);
     } catch (caught) {
+      clearTimers();
       setError((caught as Error).message);
       setStatus('error');
       runSession.setVoiceSuppressed(false);
     }
-  }, [apiKey, conversation, settings.agentId, stop]);
+  }, [apiKey, clearTimers, conversation, settings.agentId, stop]);
 
   useEffect(() => clearTimers, [clearTimers]);
 
