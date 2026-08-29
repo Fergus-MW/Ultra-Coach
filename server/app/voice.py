@@ -96,7 +96,7 @@ def agent_config(public_base_url: str, tool_secret: str) -> dict:
                     ],
                 },
             },
-            "tts": {"voice_id": DEFAULT_VOICE_ID, "model_id": "eleven_flash_v2_5"},
+            "tts": {"voice_id": DEFAULT_VOICE_ID, "model_id": "eleven_flash_v2"},
             "turn": {"turn_timeout": 10},
         },
         "platform_settings": {
