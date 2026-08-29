@@ -53,6 +53,7 @@ export function useCoachConversation() {
           agentSpeaking: conversationRef.current?.isSpeaking ?? false,
           vadScore: vad.current.score,
           vadAt: vad.current.at,
+          inputLevel: conversationRef.current?.getInputVolume() ?? 0,
         };
         if (runnerIsActive(activity)) lastSpoke.current = activity.now;
         if (shouldEndSession(activity)) stopRef.current();
