@@ -16,6 +16,10 @@ flatten your battery and your music on a six hour day.
 | Voice | ElevenLabs lines pre-rendered to the cache directory, so cues play instantly and offline. Dynamic lines synthesise live; `expo-speech` is the last resort. |
 | Conversation | ElevenLabs agent over LiveKit, user-initiated, auto-closing after 30 s of quiet. Cues are muted while it holds the mic. |
 | Testing without hardware | Simulated heart rate and route sources, with an effort bias control on the run screen. |
+| Between runs | The Coach tab holds a socket to the coaching backend in `server/`: it rings the phone, the call takes over the screen, and the coach's Healf picks land in the Healf tab. |
+
+The between-runs half is the same backend the PWA in `web/` talks to, so a phone and a browser share one runner
+history. Point a build at another one with `EXPO_PUBLIC_API_BASE`, or `expo.extra.apiBase` in `app.json`.
 
 ## Running it
 

@@ -79,6 +79,9 @@
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "apiBase": "https://ultracoach-api.onrender.com"
     }
   }
 }

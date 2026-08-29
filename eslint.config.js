@@ -5,6 +5,7 @@ module.exports = [
   ...expoConfig,
   prettier,
   {
-    ignores: ['dist/*', 'node_modules/*', '.expo/*'],
+    // The PWA lints itself, under its own Next config.
+    ignores: ['dist/*', 'node_modules/*', '.expo/*', 'web/*'],
   },
 ];
