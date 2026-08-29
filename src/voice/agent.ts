@@ -9,6 +9,8 @@ import { getConversationToken } from './elevenlabs';
 const CONTEXT_INTERVAL_MS = 30_000;
 /** The conversation closes itself so a forgotten session cannot drain the battery. */
 const SILENCE_TIMEOUT_MS = 30_000;
+/** A talkative agent must not be able to hold the mic open forever. */
+const MAX_SESSION_MS = 5 * 60_000;
 
 export type TalkStatus = 'idle' | 'connecting' | 'connected' | 'error';
 
@@ -17,7 +19,8 @@ export function useCoachConversation() {
   const apiKey = useSettings((state) => state.apiKey);
   const [status, setStatus] = useState<TalkStatus>('idle');
   const [error, setError] = useState<string | null>(null);
-  const lastActivity = useRef<number>(0);
+  const lastSpoke = useRef<number>(0);
+  const startedAt = useRef<number>(0);
   const contextTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const silenceTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -34,7 +37,8 @@ export function useCoachConversation() {
   const conversation = useConversation({
     onConnect: () => {
       setStatus('connected');
-      lastActivity.current = Date.now();
+      lastSpoke.current = Date.now();
+      startedAt.current = Date.now();
       // startSession returns before the WebRTC connection exists, so the timers
       // can only be armed here, once there is a session to talk to.
       clearTimers();
@@ -42,7 +46,13 @@ export function useCoachConversation() {
         conversationRef.current?.sendContextualUpdate(runSession.contextSummary());
       }, CONTEXT_INTERVAL_MS);
       silenceTimer.current = setInterval(() => {
-        if (Date.now() - lastActivity.current > SILENCE_TIMEOUT_MS) stopRef.current();
+        const now = Date.now();
+        if (now - startedAt.current > MAX_SESSION_MS) {
+          stopRef.current();
+          return;
+        }
+        if (conversationRef.current?.isSpeaking) return;
+        if (now - lastSpoke.current > SILENCE_TIMEOUT_MS) stopRef.current();
       }, 5000);
     },
     onDisconnect: () => {
@@ -50,8 +60,10 @@ export function useCoachConversation() {
       setStatus('idle');
       runSession.setVoiceSuppressed(false);
     },
-    onMessage: () => {
-      lastActivity.current = Date.now();
+    onMessage: ({ source }: { source: 'user' | 'ai' }) => {
+      // Only the runner speaking counts as activity: the agent asks "are you still
+      // there?" on its own, which would otherwise keep a dead session alive forever.
+      if (source === 'user') lastSpoke.current = Date.now();
     },
     onError: (message: string) => {
       clearTimers();
