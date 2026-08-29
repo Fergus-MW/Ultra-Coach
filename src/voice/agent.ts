@@ -4,13 +4,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { runSession } from '../run/session';
 import { useSettings } from '../store/settings';
 import { getConversationToken } from './elevenlabs';
+import { runnerIsActive, shouldEndSession } from './idle';
 
 /** Biometrics go in as contextual updates, never by rewriting instructions. */
 const CONTEXT_INTERVAL_MS = 30_000;
-/** The conversation closes itself so a forgotten session cannot drain the battery. */
-const SILENCE_TIMEOUT_MS = 30_000;
-/** A talkative agent must not be able to hold the mic open forever. */
-const MAX_SESSION_MS = 5 * 60_000;
+/** Fast enough to catch a pause between sentences as speech, not silence. */
+const ACTIVITY_POLL_MS = 1_000;
 
 export type TalkStatus = 'idle' | 'connecting' | 'connected' | 'error';
 
@@ -46,14 +45,16 @@ export function useCoachConversation() {
         conversationRef.current?.sendContextualUpdate(runSession.contextSummary());
       }, CONTEXT_INTERVAL_MS);
       silenceTimer.current = setInterval(() => {
-        const now = Date.now();
-        if (now - startedAt.current > MAX_SESSION_MS) {
-          stopRef.current();
-          return;
-        }
-        if (conversationRef.current?.isSpeaking) return;
-        if (now - lastSpoke.current > SILENCE_TIMEOUT_MS) stopRef.current();
-      }, 5000);
+        const activity = {
+          now: Date.now(),
+          startedAt: startedAt.current,
+          lastSpoke: lastSpoke.current,
+          agentSpeaking: conversationRef.current?.isSpeaking ?? false,
+          inputLevel: conversationRef.current?.getInputVolume() ?? 0,
+        };
+        if (runnerIsActive(activity)) lastSpoke.current = activity.now;
+        if (shouldEndSession(activity)) stopRef.current();
+      }, ACTIVITY_POLL_MS);
     },
     onDisconnect: () => {
       clearTimers();
