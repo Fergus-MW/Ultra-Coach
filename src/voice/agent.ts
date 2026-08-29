@@ -28,10 +28,22 @@ export function useCoachConversation() {
     silenceTimer.current = null;
   }, []);
 
+  const conversationRef = useRef<ReturnType<typeof useConversation> | null>(null);
+  const stopRef = useRef<() => void>(() => {});
+
   const conversation = useConversation({
     onConnect: () => {
       setStatus('connected');
       lastActivity.current = Date.now();
+      // startSession returns before the WebRTC connection exists, so the timers
+      // can only be armed here, once there is a session to talk to.
+      clearTimers();
+      contextTimer.current = setInterval(() => {
+        conversationRef.current?.sendContextualUpdate(runSession.contextSummary());
+      }, CONTEXT_INTERVAL_MS);
+      silenceTimer.current = setInterval(() => {
+        if (Date.now() - lastActivity.current > SILENCE_TIMEOUT_MS) stopRef.current();
+      }, 5000);
     },
     onDisconnect: () => {
       clearTimers();
@@ -78,28 +90,25 @@ export function useCoachConversation() {
         ? { conversationToken: await getConversationToken(apiKey, settings.agentId) }
         : { agentId: settings.agentId };
 
-      await conversation.startSession({
+      conversation.startSession({
         ...config,
         connectionType: 'webrtc' as const,
         dynamicVariables: {
           run_context: runSession.contextSummary(),
         },
       });
-
-      lastActivity.current = Date.now();
-      contextTimer.current = setInterval(() => {
-        conversation.sendContextualUpdate(runSession.contextSummary());
-      }, CONTEXT_INTERVAL_MS);
-      silenceTimer.current = setInterval(() => {
-        if (Date.now() - lastActivity.current > SILENCE_TIMEOUT_MS) stop();
-      }, 5000);
     } catch (caught) {
       clearTimers();
       setError((caught as Error).message);
       setStatus('error');
       runSession.setVoiceSuppressed(false);
     }
-  }, [apiKey, clearTimers, conversation, settings.agentId, stop]);
+  }, [apiKey, clearTimers, conversation, settings.agentId]);
+
+  useEffect(() => {
+    conversationRef.current = conversation;
+    stopRef.current = stop;
+  });
 
   useEffect(() => clearTimers, [clearTimers]);
 
