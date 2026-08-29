@@ -237,11 +237,17 @@ export default function CallScreen({ onProducts }: Props) {
     // numbers arrive some seconds after the watch says it is connected. Poll until they
     // do rather than leaving the runner to guess when to come back.
     if (!awaitingSync) return;
-    const timer = window.setInterval(() => {
+    let live = true;
+    // Each ask waits for the last answer, so a slow platform gathers no queue behind it.
+    let timer = window.setTimeout(async function again() {
       const me = who.current;
-      if (me && !document.hidden) wearableStatus(me).then(setWearable, () => undefined);
+      if (me && !document.hidden) await wearableStatus(me).then(setWearable, () => undefined);
+      if (live) timer = window.setTimeout(again, 15000);
     }, 15000);
-    return () => window.clearInterval(timer);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
   }, [awaitingSync]);
 
   const linkWatch = useCallback(async () => {

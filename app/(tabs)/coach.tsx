@@ -43,8 +43,17 @@ export default function CoachTab() {
     // That first look lands before the platform has pulled anything from the watch, so
     // keep asking until the numbers arrive instead of leaving an empty card behind.
     if (!awaitingSync) return;
-    const timer = setInterval(() => void useCoach.getState().refreshWearable(), 15000);
-    return () => clearInterval(timer);
+    let live = true;
+    // Waiting for each answer before asking again: a slow platform must not have a
+    // queue of identical requests piling up behind it.
+    let timer = setTimeout(async function again() {
+      await useCoach.getState().refreshWearable();
+      if (live) timer = setTimeout(again, 15000);
+    }, 15000);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
   }, [awaitingSync]);
 
   const run = async (key: string, work: (me: Identity) => Promise<void>) => {
